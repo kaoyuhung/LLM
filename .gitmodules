@@ -1,0 +1,3 @@
+[submodule "ntu_paslab_llm"]
+	path = ntu_paslab_llm
+	url = https://github.com/muchi674/ntu_paslab_llm.git

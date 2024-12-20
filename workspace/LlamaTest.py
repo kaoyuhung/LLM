@@ -1,10 +1,15 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, LlamaForCausalLM
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    LlamaForCausalLM,
+    DynamicCache,
+)
+
 from tqdm import tqdm
 import argparse
 from torchinfo import summary
 from util import setup_seed, load_data, _make_causal_mask, get_sampling_logits
-from Llama_KV import KV_Cache
 from torch.nn.functional import softmax
 
 
@@ -21,29 +26,46 @@ def main(args):
     print(f"tokenizer.pad_token: {tokenizer.pad_token}")
 
     model = LlamaForCausalLM.from_pretrained(args.model, torch_dtype=dtype).to(device)
+    # model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype).to(
+    #    device
+    # )
     model.eval()
     config = model.config
     print(config)
 
     if args.mode == "printModel":
-        summary(model, input_data=input, depth=6)
+        input_ids = tokenizer(prompts[0], return_tensors="pt").input_ids.to(device)
+        summary(model, input_data=input_ids, depth=6)
 
     elif args.mode == "genText":
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
         print(f"input: {prompts[0]}")
-        input_ids = tokenizer(prompts[0], return_tensors="pt").input_ids.to(device)
+        input = tokenizer(prompts[0], return_tensors="pt")
+        input_ids = input.input_ids.to(device)
+        attn_mask = input.attention_mask.to(device)
+        start_event.record()
         output = model.generate(
             input_ids,
-            max_length=args.max_length,  # Adjust the max length of the output
-            temperature=0.6,  # Controls randomness of the output
-            top_p=0.9,  # Controls diversity via nucleus sampling
+            attention_mask=attn_mask,
+            max_length=args.max_length,
+            temperature=args.T,
+            top_p=args.P,
+            use_cache=args.use_KVcache,
         )
-        output = tokenizer.decode(
+        end_event.record()
+        torch.cuda.synchronize()
+
+        gentext = tokenizer.decode(
             output[0][input_ids.shape[1] + 1 :],
             skip_special_tokens=True,
             clean_up_tokenization_spaces=True,
             spaces_between_special_tokens=False,
+        ).strip()
+        print(f"output: {gentext}")
+        print(
+            f"generation elapsed time: {start_event.elapsed_time(end_event)} ms, #output token: {len(output[0]) - input_ids.shape[1]}"
         )
-        print(f"output: {output}")
 
     elif args.mode == "measure":
         start_event = torch.cuda.Event(enable_timing=True)
@@ -51,85 +73,95 @@ def main(args):
 
         with torch.no_grad():
             for i in tqdm(range(args.nItrs)):
-                input_ids = tokenizer(prompts[i], return_tensors="pt").input_ids.to(
-                    device
-                )
-                initial_len = input_ids.shape[1]
-                position_ids = torch.arange(args.max_length).to(device).unsqueeze(0)
-                storage_ids = torch.arange(args.max_length).to(device)
-                attn_mask = _make_causal_mask(
-                    (args.max_length, args.max_length), model.dtype, device
-                )
-                kv_cache = KV_Cache(
-                    config=config,
-                    max_length=args.max_length,
-                    device=device,
-                    dtype=dtype,
-                )
-                generated_ids = []
+                input = tokenizer(prompts[i], return_tensors="pt")
+                input_ids = input.input_ids.to(device)
+                attn_mask = None
+
                 decoding_step, initial_len = 0, input_ids.shape[1]
-                TPOTs = []
+                # position_ids = torch.arange(args.max_length).to(device).unsqueeze(0)
+                # storage_ids = torch.arange(args.max_length).to(device)
+                # attn_mask = _make_causal_mask(
+                #     (args.max_length, args.max_length), model.dtype, device
+                # )
+                if args.use_KVcache:
+                    cache_position = torch.arange(
+                        initial_len, dtype=torch.int64, device=device
+                    )  # torch.Size([initial_len])
+                    past_key_values = DynamicCache()
+
+                generated_ids, TPOTs = [], []
+
                 while decoding_step + initial_len < args.max_length:
                     start_event.record()
-                    if decoding_step == 0:
-                        output = model(
-                            input_ids=input_ids,
-                            attention_mask=attn_mask[:initial_len, :initial_len][
-                                None, None, :, :
-                            ],
-                            position_ids=position_ids[
-                                ...,
-                                :initial_len,
-                            ],
-                        )
-                    else:
-                        output = model(
-                            input_ids=input_ids,
+                    if args.use_KVcache:
+                        outputs = model(
+                            input_ids,
+                            attention_mask=attn_mask,
+                            use_cache=True,
                             past_key_values=past_key_values,
-                            attention_mask=None,  # Already handled in caching
-                            position_ids=position_ids[
-                                ...,
-                                decoding_step
-                                + initial_len
-                                - 1 : decoding_step
-                                + initial_len,
-                            ],
+                            cache_position=cache_position,
                         )
+                        cache_position = cache_position[-1:] + 1
+                        # print(len(past_key_values.key_cache))
+                        # print(len(past_key_values.value_cache))
+
+                    else:
+                        outputs = model(
+                            input_ids, attention_mask=attn_mask, use_cache=False
+                        )
+                    # attn_mask = torch.cat(
+                    #     [attn_mask, attn_mask.new_ones((attn_mask.shape[0], 1))],
+                    #     dim=-1,
+                    # )  # new_ones() creates a new tensor on the same devic
+
                     end_event.record()
                     torch.cuda.synchronize()
                     TPOTs.append(start_event.elapsed_time(end_event))
 
-                    logits, past_key_values = (
-                        output["logits"][0][-1],
-                        output["past_key_values"],
-                    )  # torch.Size([1, 28, 32000]) and (32 2 torch.Size([1, 32, 28, 128]))
+                    if args.greedy:
+                        next_token_ids = outputs.logits[:, -1:].argmax(-1)
+                    else:
+                        logits = get_sampling_logits(
+                            logits=outputs.logits[:, -1], top_p=args.P, T=args.T
+                        )
+                        p = softmax(logits / args.T, dim=-1)
+                        next_token_ids = p.multinomial(num_samples=1)
 
-                    logits = get_sampling_logits(logits=logits, top_p=args.P, T=args.T)
-                    p = softmax(logits / args.T, dim=-1)
-                    output_ids = p.multinomial(num_samples=1).unsqueeze(0)
+                    if args.use_KVcache:
+                        input_ids = next_token_ids
+                    else:
+                        input_ids = torch.cat([input_ids, next_token_ids], dim=-1)
 
-                    generated_ids.append(output_ids[0].item())
-                    input_ids = output_ids
+                    generated_ids.append(next_token_ids[0].item())
                     decoding_step += 1
 
-                print(len(generated_ids))
                 generated_text = tokenizer.decode(
                     generated_ids,
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=True,
                     spaces_between_special_tokens=False,
-                )
-                print(generated_text)
+                ).strip()
+                print(f"input: {prompts[i]}")
+                print(f"generated_text: {generated_text}")
+                print(f"-" * 100)
                 print(
-                    f"TTFT: {TPOTs[0]:.2f}ms, TPOT: {sum(TPOTs[1:]) / len(TPOTs[1:]):.2f}ms"
+                    f"TTFT: {TPOTs[0]:.2f}ms, TPOT: {sum(TPOTs[1:]) / len(TPOTs[1:]):.2f} ms, #gen_token: {len(generated_ids)}"
                 )
-                exit()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--model", type=str, help="model", default="meta-llama/Llama-2-7b-hf"
+        "--model",
+        type=str,
+        help="model",
+        default="meta-llama/Llama-2-7b-hf",
+        choices=[
+            "meta-llama/Llama-2-7b-hf",
+            "meta-llama/Meta-Llama-3-8B",
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "mistralai/Mistral-7B-Instruct-v0.3",
+        ],
     )
     parser.add_argument("--seed", type=int, default=17, help="random seed")
     parser.add_argument("--vocab", type=int, default=32000, help="vocab size")
@@ -139,11 +171,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        default="genText",
+        default="measure",
         choices=["genText", "printModel", "measure"],
     )
-    parser.add_argument("--max_length", type=int, default=1024)
-    parser.add_argument("--nItrs", type=int, default=10)
+    parser.add_argument("--max_length", type=int, default=128)
+    parser.add_argument("--nItrs", type=int, default=1)
+    parser.add_argument("--use_KVcache", type=eval, default=True)
     parser.add_argument("--T", type=float, default=0.6, help="temperature")
     parser.add_argument("--P", type=float, default=0.9, help="top_p")
+    parser.add_argument("--greedy", type=eval, default=False)
     main(parser.parse_args())
