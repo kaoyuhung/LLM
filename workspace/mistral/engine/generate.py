@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch
 
-from mistral_inference.cache import BufferCache
+from engine.cache import BufferCache
 from mistral_inference.mamba import Mamba
 from mistral_inference.transformer import Transformer
 
@@ -146,8 +146,9 @@ def profile_generate(
 
     assert all(len(p) > 0 for p in encoded_prompts)
 
+    torch.cuda.cudart().cudaProfilerStart()
     torch.cuda.nvtx.range_push("prefill forward")
-    prelogits = model.forward(
+    prelogits = model.forward_profile(
         torch.tensor(sum(encoded_prompts, []), device=model.device, dtype=torch.long),
         seqlens=[len(p) for p in encoded_prompts],
         cache=cache,
@@ -203,10 +204,14 @@ def profile_generate(
         generated_tensors.append(next_token[:, None])
 
         torch.cuda.nvtx.range_push("decode forward")
-        last_token_prelogits = model.forward(next_token, seqlens=[1] * B, cache=cache)
+        last_token_prelogits = model.forward_profile(
+            next_token, seqlens=[1] * B, cache=cache
+        )
         torch.cuda.nvtx.range_pop()
 
         assert last_token_prelogits.shape == (B, V)
+
+    torch.cuda.cudart().cudaProfilerStop()
 
     generated_tokens: List[List[int]]
     if generated_tensors:

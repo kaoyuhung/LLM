@@ -7,7 +7,7 @@ from xformers.ops.fmha import memory_efficient_attention  # type: ignore
 from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
 from mistral_inference.args import LoraArgs
-from mistral_inference.cache import CacheView
+from engine.cache import CacheView
 from mistral_inference.lora import LoRALinear
 from mistral_inference.moe import MoeArgs, MoeLayer
 from mistral_inference.rope import apply_rotary_emb

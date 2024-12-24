@@ -18,49 +18,66 @@ from tqdm import tqdm
 
 
 def getModelandTokenizeer(
-    mistral_models_path, dist=False, node_id=None, gpu=None, group=None
+    model_name,
+    mistral_models_path,
+    distributed=False,
+    node_id=None,
+    gpu=None,
+    group=None,
 ):
-    repo_id = "mistralai/" + mistral_models_path[mistral_models_path.index("/") + 1 :]
+
     mistral_models_path = Path(mistral_models_path)
-    mistral_models_path.mkdir(parents=True, exist_ok=True)
-
-    if dist:
-        if LOCAL_RANK == 0:
-            snapshot_download(
-                repo_id=repo_id,
-                allow_patterns=[
-                    "*.json",
-                    "*.safetensors",
-                    "tokenizer.model*",
-                ],
-                local_dir=mistral_models_path,
-            )
-        dist.barrier(group=group)
-        tokenizer = MistralTokenizer.from_file(
-            f"{mistral_models_path}/tokenizer.model.v3"
-        )
-        # model = Transformer.from_folder(mistral_models_path)
-        model = Transformer.load(Path(mistral_models_path), node_id, gpu, group)
-
-    else:
+    if not mistral_models_path.exists() and (not distributed or LOCAL_RANK == 0):
+        mistral_models_path.mkdir(parents=True, exist_ok=True)
         snapshot_download(
-            repo_id=repo_id,
+            repo_id="mistralai/" + model_name,
             allow_patterns=[
-                "params.json",
-                "consolidated.safetensors",
-                "tokenizer.model.v3",
+                "*.json",
+                "*.safetensors",
+                "tokenizer.model*",
             ],
             local_dir=mistral_models_path,
         )
-        tokenizer = MistralTokenizer.from_file(
-            f"{mistral_models_path}/tokenizer.model.v3"
-        )
+
+    if model_name == "Mistral-7B-Instruct-v0.3":
+        tokenizer_path = f"{mistral_models_path}/tokenizer.model.v3"
+
+    elif model_name == "Mixtral-8x7B-Instruct-v0.1":
+        tokenizer_path = f"{mistral_models_path}/tokenizer.model"
+
+    if distributed:
+        dist.barrier(group=group)
+
+        if model_name == "Mistral-7B-Instruct-v0.3":
+            tokenizer_path = f"{mistral_models_path}/tokenizer.model.v3"
+            tokenizer = MistralTokenizer.from_file(tokenizer_path)
+            model = Transformer.from_folder(
+                folder=mistral_models_path, num_pipeline_ranks=WORLD_SIZE, device=gpu
+            )
+
+        elif model_name == "Mixtral-8x7B-Instruct-v0.1":
+            # tokenizer = MistralTokenizer.v1()
+            tokenizer_path = f"{mistral_models_path}/tokenizer.model"
+            tokenizer = MistralTokenizer.from_file(tokenizer_path)
+            # model = Transformer.load(
+            #     f"{mistral_models_path}/experts.pt", NODE_RANK, gpu, group
+            # )
+            model = Transformer.from_folder(
+                folder=mistral_models_path, num_pipeline_ranks=WORLD_SIZE, device=gpu
+            )
+
+    else:
+        if model_name == "Mistral-7B-Instruct-v0.3":
+            tokenizer_path = f"{mistral_models_path}/tokenizer.model.v3"
+            tokenizer = MistralTokenizer.from_file(tokenizer_path)
+
         model = Transformer.from_folder(mistral_models_path)
 
     return model, tokenizer
 
 
 def run_default(
+    model_name: str,
     model_path: str,
     max_tokens: int,
     T: float,
@@ -71,7 +88,7 @@ def run_default(
     warmup_iters: int,
 ):
 
-    model, tokenizer = getModelandTokenizeer(model_path)
+    model, tokenizer = getModelandTokenizeer(model_name, model_path)
     device = torch.device("cuda")
     model.to(device)
     model.eval()
@@ -102,7 +119,7 @@ def run_default(
         result = tokenizer.instruct_tokenizer.tokenizer.decode(out_tokens[0])
         print(result)
 
-    elif mode == "profile":
+    elif mode == "nsys_profile":
         completion_request = ChatCompletionRequest(
             messages=[UserMessage(content=prompts[0])]
         )
@@ -116,26 +133,13 @@ def run_default(
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
 
-        torch.cuda.cudart().cudaProfilerStart()
-        for i in range(eval_nItrs):
-            prompt = "[INST]" + prompts[i] + "[/INST]" + "\n\nASSISTANT:"
-            print(prompt, end=" ", flush=True)
-            completion_request = ChatCompletionRequest(
-                messages=[UserMessage(content=prompt)]
-            )
-            tokens = tokenizer.encode_chat_completion(completion_request).tokens
-            torch.cuda.nvtx.range_push("iteration{}".format(i))
-            out_tokens, _ = profile_generate(
-                [tokens],
-                model,
-                max_tokens=max_tokens,
-                temperature=args.T,
-                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-            )
-            torch.cuda.nvtx.range_pop()
-            result = tokenizer.instruct_tokenizer.tokenizer.decode(out_tokens[0])
-            print(result)
-        torch.cuda.cudart().cudaProfilerStop()
+        out_tokens, _ = profile_generate(
+            [tokens],
+            model,
+            max_tokens=2,
+            temperature=args.T,
+            eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+        )
 
     elif mode == "measure":
         completion_request = ChatCompletionRequest(
@@ -174,14 +178,15 @@ def run_default(
 
 
 def run_dist(
+    model_name: str,
     model_path: str,
-    max_token: int,
+    max_tokens: int,
     T: float,
     P: float,
     mode: str,
-    prompts: list,
     eval_nItrs: int,
     warmup_iters: int,
+    benchmark: str,
 ):
 
     gpu = torch.device(f"cuda:{LOCAL_RANK}")
@@ -189,13 +194,109 @@ def run_dist(
         "nccl", rank=WORLD_RANK, world_size=WORLD_SIZE, device_id=gpu
     )
     group = dist.new_group(list(range(WORLD_SIZE)), use_local_synchronization=True)
-    model, tokenizer = getModelandTokenizeer(model_path, True, NODE_RANK, gpu, group)
+    prompts = load_data(benchmark, "../dataset", True, LOCAL_RANK, group)
+    model, tokenizer = getModelandTokenizeer(
+        model_name, model_path, True, NODE_RANK, gpu, group
+    )
     model.eval()
+
+    if mode == "genText":
+        completion_request = ChatCompletionRequest(
+            messages=[UserMessage(content=prompts[0])]
+        )
+        tokens = tokenizer.encode_chat_completion(completion_request).tokens
+        out_tokens, _ = generate(
+            [tokens],
+            model,
+            max_tokens=max_tokens,
+            temperature=args.T,
+            eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+        )
+
+        if WORLD_RANK == WORLD_SIZE - 1:
+            result = tokenizer.instruct_tokenizer.tokenizer.decode(out_tokens[0])
+            print(result)
+
+        dist.barrier(group=group)
+
+    elif mode == "measure":
+        completion_request = ChatCompletionRequest(
+            messages=[UserMessage(content=prompts[0])]
+        )
+        tokens = tokenizer.encode_chat_completion(completion_request).tokens
+
+        with tqdm(total=warmup_iters, desc="GPU warmup") as pbar:
+            for _ in range(warmup_iters):
+                if LOCAL_RANK == 0:
+                    pbar.update(1)
+                generate(
+                    [tokens],
+                    model,
+                    max_tokens=max_tokens,
+                    temperature=args.T,
+                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                )
+
+        for i in range(eval_nItrs):
+            prompt = "[INST]" + prompts[i] + "[/INST]" + "\n\nASSISTANT:"
+            # print(prompt, end=" ", flush=True)
+            completion_request = ChatCompletionRequest(
+                messages=[UserMessage(content=prompt)]
+            )
+            tokens = tokenizer.encode_chat_completion(completion_request).tokens
+            out_tokens, _, TPOTs = measure_generate(
+                [tokens],
+                model,
+                max_tokens=max_tokens,
+                temperature=args.T,
+                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            )
+
+            if LOCAL_RANK == 0:
+                print(
+                    f"{i} TTFT: {TPOTs[0]:.2f}ms, TPOT: {sum(TPOTs[1:]) / len(TPOTs[1:]):.2f} ms, #gen_token: {len(TPOTs)}"
+                )
+                print("-" * 100)
+
+            dist.barrier(group=group)
+
+    elif mode == "nsys_profile":
+        completion_request = ChatCompletionRequest(
+            messages=[UserMessage(content=prompts[0])]
+        )
+        tokens = tokenizer.encode_chat_completion(completion_request).tokens
+        with tqdm(total=warmup_iters, desc="GPU warmup") as pbar:
+            for _ in range(warmup_iters):
+                if LOCAL_RANK == 0:
+                    pbar.update(1)
+                generate(
+                    [tokens],
+                    model,
+                    max_tokens=max_tokens,
+                    temperature=args.T,
+                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                )
+
+        out_tokens, _ = profile_generate(
+            [tokens],
+            model,
+            max_tokens=2,
+            temperature=args.T,
+            eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+        )
+
+        dist.barrier(group=group)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=17, help="random seed")
+    parser.add_argument(
+        "--model",
+        type=str,
+        required=True,
+        choices=["Mistral-7B-Instruct-v0.3", "Mixtral-8x7B-Instruct-v0.1"],
+    )
     parser.add_argument(
         "--model_path",
         type=str,
@@ -208,7 +309,7 @@ if __name__ == "__main__":
         "--mode",
         type=str,
         default="measure",
-        choices=["genText", "printModel", "measure", "profile"],
+        choices=["genText", "printModel", "measure", "nsys_profile"],
     )
     parser.add_argument(
         "--benchmark",
@@ -225,7 +326,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     setup_seed(args.seed)
-    prompts = load_data(args.benchmark)
 
     if "WORLD_SIZE" in os.environ:
         LOCAL_RANK = int(os.environ["LOCAL_RANK"])
@@ -234,17 +334,22 @@ if __name__ == "__main__":
         WORLD_RANK = int(os.environ["RANK"])
         NODE_RANK = WORLD_RANK // LOCAL_WORLD_SIZE
         run_dist(
+            args.model,
             args.model_path,
             args.max_tokens,
             args.T,
             args.P,
             args.mode,
-            prompts,
             args.eval_nItrs,
             args.warmup_iters,
+            args.benchmark,
         )
+
+        dist.destroy_process_group()
     else:
+        prompts = load_data(args.benchmark)
         run_default(
+            args.model,
             args.model_path,
             args.max_tokens,
             args.T,

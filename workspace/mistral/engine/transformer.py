@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 from mistral_inference.args import TransformerArgs
-from mistral_inference.cache import BufferCache, CacheInputMetadata
+from engine.cache import BufferCache, CacheInputMetadata
 from mistral_inference.lora import LoRALoaderMixin
 from mistral_inference.model import ModelBase
 from mistral_inference.rope import precompute_freqs_cis
@@ -196,6 +196,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 cache_view = cache.get_view(local_layer_id, cache_metadata)
             else:
                 cache_view = None
+            # print(cache_view.mask.q_seqinfo.seqstart.device)
             h = layer(h, freqs_cis, cache_view)
 
         if cache is not None:
@@ -322,3 +323,119 @@ class Transformer(ModelBase, LoRALoaderMixin):
         model.load_state_dict(loaded, assign=True, strict=True)
 
         return model.to(device=device, dtype=dtype)
+
+    def forward_profile(
+        self,
+        input_ids: torch.Tensor,
+        seqlens: List[int],
+        cache: Optional[BufferCache] = None,
+        images: Optional[List[torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """Local forward pass.
+
+        If doing pipeline parallelism, this will return the activations of the last layer of this stage.
+        For the last stage, this will return the normalized final embeddings.
+        """
+        assert (
+            len(seqlens) <= self.args.max_batch_size
+        ), f"Max batch size is {self.args.max_batch_size}, got batch size of {len(seqlens)}"
+        (num_toks,) = input_ids.shape
+        assert sum(seqlens) == num_toks, (sum(seqlens), num_toks)
+
+        input_metadata: List[CacheInputMetadata] | List[SimpleInputMetadata]
+
+        if cache is not None:
+            input_metadata = cache.get_input_metadata(seqlens)
+        else:
+            input_metadata = [
+                SimpleInputMetadata.from_seqlens(seqlens, self.device)
+                for _ in range(len(self.layers))
+            ]
+
+        if self.pipeline_rank == 0:
+            torch.cuda.nvtx.range_push("tok_embeddings lookup")
+            assert self.tok_embeddings is not None
+            if self.vision_encoder is not None and images:
+                h = self.embed_vision_language_features(input_ids, images)
+            else:
+                h = self.tok_embeddings(input_ids)
+            torch.cuda.nvtx.range_pop()
+        else:
+            h = torch.empty(
+                num_toks, self.args.dim, device=self.device, dtype=self.dtype
+            )
+            torch.cuda.nvtx.range_push("PP wait")
+            torch.distributed.recv(h, src=self.pipeline_rank - 1)
+            torch.cuda.nvtx.range_pop()
+
+        # freqs_cis is always the same for every layer
+        freqs_cis = self.freqs_cis[input_metadata[0].positions]
+
+        for local_layer_id, layer in enumerate(self.layers.values()):
+            if cache is not None:
+                assert input_metadata is not None
+                cache_metadata = input_metadata[local_layer_id]
+                assert isinstance(cache_metadata, CacheInputMetadata)
+                cache_view = cache.get_view(local_layer_id, cache_metadata)
+            else:
+                cache_view = None
+            # print(cache_view.mask.q_seqinfo.seqstart.device)
+            torch.cuda.nvtx.range_push(f"local_layer_id={local_layer_id} forward")
+            h = layer(h, freqs_cis, cache_view)
+            torch.cuda.nvtx.range_pop()
+
+        if cache is not None:
+            cache.update_seqlens(seqlens)
+
+        if self.pipeline_rank < self.num_pipeline_ranks - 1:
+            torch.distributed.send(h, dst=self.pipeline_rank + 1)
+        else:
+            # Last rank has a final normalization step.
+            assert self.norm is not None
+            h = self.norm(h)  # type: ignore
+
+        if self.pipeline_rank < self.num_pipeline_ranks - 1:
+            # ignore the intermediate activations as we'll get the final output from
+            # the last stage
+            outs = torch.empty(
+                h.shape[0], self.vocab_size, device=h.device, dtype=h.dtype
+            )
+        else:
+            assert self.output is not None
+            outs = self.output(h)
+
+        if self.num_pipeline_ranks > 1:
+            torch.distributed.broadcast(outs, src=self.num_pipeline_ranks - 1)
+
+        if self.softmax_fp32:
+            return outs.float()
+        else:
+            return outs
+
+    # @staticmethod
+    # def load(
+    #     model_path: Path, node_id: int, local_rank: int, gpu: torch.device, group
+    # ) -> "Transformer":
+
+    #     with open(Path(model_path) / "params.json", "r") as f:
+    #         model_args = TransformerArgs.from_dict(json.load(f))
+
+    #     # model_args = ModelArgs.from_hf_config(get_json(model_path / "config.json"))
+    #     non_experts = torch.load(
+    #         model_path / "non-experts-1-0.pt",
+    #         map_location=gpu,
+    #         weights_only=True,
+    #         mmap=True,
+    #     )
+    #     experts = torch.load(
+    #         model_path / f"experts-{node_id + LOCAL_RANK}.pt",
+    #         map_location=gpu,
+    #         weights_only=True,
+    #         mmap=True,
+    #     )
+
+    #     with torch.device("meta"):
+    #         model = Transformer(args=model_args, experts=Experts(experts), group=group)
+    #     model.load_state_dict(non_experts, assign=True, strict=True)
+
+    #     return model

@@ -1,6 +1,7 @@
 import os
 import json
 import torch
+import torch.distributed as dist
 import numpy as np
 
 
@@ -11,7 +12,9 @@ def setup_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 
-def load_data(benchmark, folder="../dataset"):
+def load_data(
+    benchmark, folder="../dataset", distributed=False, local_rank=None, group=None
+):
 
     def download_url(url: str, folder="folder"):
         """
@@ -44,18 +47,24 @@ def load_data(benchmark, folder="../dataset"):
         return
 
     if benchmark == "mt_bench" or benchmark == "vicuna_bench":
-        if not os.path.exists(f"{folder}/{benchmark}/question.jsonl"):
+        if not os.path.exists(f"{folder}/{benchmark}/question.jsonl") and (
+            not distributed or local_rank == 0
+        ):
             download_url(
                 f"https://raw.githubusercontent.com/lm-sys/FastChat/main/fastchat/llm_judge/data/{benchmark}/question.jsonl",
                 f"{folder}/{benchmark}",
             )
+
+        if distributed:
+            dist.barrier(group)
+
         prompts = []
         with open(f"{folder}/{benchmark}/question.jsonl", "r") as file:
             for line in file:
                 prompts.append(json.loads(line)["turns"][0])
     else:
         raise ValueError("Unsupporeted Benchmark")
-    # print(prompts)
+
     return prompts
 
 
