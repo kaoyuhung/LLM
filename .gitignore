@@ -1,3 +1,7 @@
 __pycache__/
 ntu_paslab_llm
-Sequoia
+*Sequoia
+*.nys-rep
+workspace/dataset
+*weights
+*.nsys-rep

@@ -1,3 +1,7 @@
+import sys
+
+sys.path.append("..")
+
 import torch
 from transformers import (
     AutoTokenizer,
@@ -15,12 +19,12 @@ from torch.nn.functional import softmax
 
 def main(args):
     setup_seed(args.seed)
-    prompts = load_data(args.test_filepath)
+    prompts = load_data(args.benchmark)
     dtype = torch.bfloat16
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
-    # if not tokenizer.pad_token:
-    #     tokenizer.pad_token = tokenizer.eos_token  # </s> is the eos token
+    if not tokenizer.pad_token:
+        tokenizer.pad_token = tokenizer.eos_token  # </s> is the eos token
     print(f"tokenizer.bos_token: {tokenizer.bos_token}")
     print(f"tokenizer.eos_token: {tokenizer.eos_token}")
     print(f"tokenizer.pad_token: {tokenizer.pad_token}")
@@ -31,6 +35,8 @@ def main(args):
     # )
     model.eval()
     config = model.config
+    if args.torch_compile:
+        model = torch.compile(model, mode="reduce-overhead")
     print(config)
 
     if args.mode == "printModel":
@@ -40,8 +46,9 @@ def main(args):
     elif args.mode == "genText":
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
-        print(f"input: {prompts[0]}")
-        input = tokenizer(prompts[0], return_tensors="pt")
+        prompt = "[INST]" + prompts[0] + "[/INST]" + "\n\nASSISTANT:"
+        print(f"input: {prompt}")
+        input = tokenizer(prompt, return_tensors="pt")
         input_ids = input.input_ids.to(device)
         attn_mask = input.attention_mask.to(device)
         start_event.record()
@@ -51,31 +58,33 @@ def main(args):
             max_length=args.max_length,
             temperature=args.T,
             top_p=args.P,
-            use_cache=args.use_KVcache,
         )
         end_event.record()
         torch.cuda.synchronize()
 
         gentext = tokenizer.decode(
-            output[0][input_ids.shape[1] + 1 :],
+            output[0][input_ids.shape[1] :],
             skip_special_tokens=True,
             clean_up_tokenization_spaces=True,
             spaces_between_special_tokens=False,
         ).strip()
-        print(f"output: {gentext}")
+        print(gentext)
         print(
             f"generation elapsed time: {start_event.elapsed_time(end_event)} ms, #output token: {len(output[0]) - input_ids.shape[1]}"
         )
 
     elif args.mode == "measure":
+        
+
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
-
         with torch.no_grad():
-            for i in tqdm(range(args.nItrs)):
-                input = tokenizer(prompts[i], return_tensors="pt")
+            for i in tqdm(range(args.eval_nItrs)):
+                prompt = "[INST]" + prompts[i] + "[/INST]" + "\n\nASSISTANT:"
+                print(prompt, end=" ", flush=True)
+                input = tokenizer(prompt, return_tensors="pt")
                 input_ids = input.input_ids.to(device)
-                attn_mask = None
+                # attn_mask = None
 
                 decoding_step, initial_len = 0, input_ids.shape[1]
                 # position_ids = torch.arange(args.max_length).to(device).unsqueeze(0)
@@ -96,8 +105,6 @@ def main(args):
                     if args.use_KVcache:
                         outputs = model(
                             input_ids,
-                            attention_mask=attn_mask,
-                            use_cache=True,
                             past_key_values=past_key_values,
                             cache_position=cache_position,
                         )
@@ -106,9 +113,7 @@ def main(args):
                         # print(len(past_key_values.value_cache))
 
                     else:
-                        outputs = model(
-                            input_ids, attention_mask=attn_mask, use_cache=False
-                        )
+                        outputs = model(input_ids, use_cache=False)
                     # attn_mask = torch.cat(
                     #     [attn_mask, attn_mask.new_ones((attn_mask.shape[0], 1))],
                     #     dim=-1,
@@ -141,11 +146,11 @@ def main(args):
                     clean_up_tokenization_spaces=True,
                     spaces_between_special_tokens=False,
                 ).strip()
-                print(f"input: {prompts[i]}")
-                print(f"generated_text: {generated_text}")
-                print(f"-" * 100)
+
+                print(generated_text)
+                print("\n" + "-" * 100)
                 print(
-                    f"TTFT: {TPOTs[0]:.2f}ms, TPOT: {sum(TPOTs[1:]) / len(TPOTs[1:]):.2f} ms, #gen_token: {len(generated_ids)}"
+                    f"{i} TTFT: {TPOTs[0]:.2f}ms, TPOT: {sum(TPOTs[1:]) / len(TPOTs[1:]):.2f} ms, #gen_token: {len(generated_ids)}"
                 )
 
 
@@ -155,7 +160,7 @@ if __name__ == "__main__":
         "--model",
         type=str,
         help="model",
-        default="meta-llama/Llama-2-7b-hf",
+        default="meta-llama/Llama-3.1-8B-Instruct",
         choices=[
             "meta-llama/Llama-2-7b-hf",
             "meta-llama/Meta-Llama-3-8B",
@@ -166,7 +171,10 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=17, help="random seed")
     parser.add_argument("--vocab", type=int, default=32000, help="vocab size")
     parser.add_argument(
-        "--test_filepath", type=str, default="dataset/mt_bench/question.jsonl"
+        "--benchmark",
+        type=str,
+        default="mt_bench",
+        choices=["mt_bench", "vicuna_bench"],
     )
     parser.add_argument(
         "--mode",
@@ -174,10 +182,11 @@ if __name__ == "__main__":
         default="measure",
         choices=["genText", "printModel", "measure"],
     )
-    parser.add_argument("--max_length", type=int, default=128)
-    parser.add_argument("--nItrs", type=int, default=1)
+    parser.add_argument("--max_length", type=int, default=256)
+    parser.add_argument("--eval_nItrs", type=int, default=1)
     parser.add_argument("--use_KVcache", type=eval, default=True)
     parser.add_argument("--T", type=float, default=0.6, help="temperature")
     parser.add_argument("--P", type=float, default=0.9, help="top_p")
     parser.add_argument("--greedy", type=eval, default=False)
+    parser.add_argument("--torch_compile", type=eval, default=False)
     main(parser.parse_args())

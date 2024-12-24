@@ -11,7 +11,7 @@ def setup_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 
-def load_data(test_filepath):
+def load_data(benchmark, folder="../dataset"):
 
     def download_url(url: str, folder="folder"):
         """
@@ -43,15 +43,18 @@ def load_data(test_filepath):
 
         return
 
-    if not os.path.exists(test_filepath):
-        download_url(
-            "https://raw.githubusercontent.com/lm-sys/FastChat/main/fastchat/llm_judge/data/mt_bench/question.jsonl",
-            test_filepath.rpartition("/")[0],
-        )
-    prompts = []
-    with open(test_filepath, "r") as file:
-        for line in file:
-            prompts.append(json.loads(line)["turns"][0])
+    if benchmark == "mt_bench" or benchmark == "vicuna_bench":
+        if not os.path.exists(f"{folder}/{benchmark}/question.jsonl"):
+            download_url(
+                f"https://raw.githubusercontent.com/lm-sys/FastChat/main/fastchat/llm_judge/data/{benchmark}/question.jsonl",
+                f"{folder}/{benchmark}",
+            )
+        prompts = []
+        with open(f"{folder}/{benchmark}/question.jsonl", "r") as file:
+            for line in file:
+                prompts.append(json.loads(line)["turns"][0])
+    else:
+        raise ValueError("Unsupporeted Benchmark")
     # print(prompts)
     return prompts
 
