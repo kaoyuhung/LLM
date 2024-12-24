@@ -17,27 +17,52 @@ from torchinfo import summary
 from tqdm import tqdm
 
 
-def getModelandTokenizeer(mistral_models_path):
+def getModelandTokenizeer(
+    mistral_models_path, dist=False, node_id=None, gpu=None, group=None
+):
     repo_id = "mistralai/" + mistral_models_path[mistral_models_path.index("/") + 1 :]
     mistral_models_path = Path(mistral_models_path)
     mistral_models_path.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
-        repo_id=repo_id,
-        allow_patterns=[
-            "params.json",
-            "consolidated.safetensors",
-            "tokenizer.model.v3",
-        ],
-        local_dir=mistral_models_path,
-    )
-    tokenizer = MistralTokenizer.from_file(f"{mistral_models_path}/tokenizer.model.v3")
-    model = Transformer.from_folder(mistral_models_path)
+
+    if dist:
+        if LOCAL_RANK == 0:
+            snapshot_download(
+                repo_id=repo_id,
+                allow_patterns=[
+                    "*.json",
+                    "*.safetensors",
+                    "tokenizer.model*",
+                ],
+                local_dir=mistral_models_path,
+            )
+        dist.barrier(group=group)
+        tokenizer = MistralTokenizer.from_file(
+            f"{mistral_models_path}/tokenizer.model.v3"
+        )
+        # model = Transformer.from_folder(mistral_models_path)
+        model = Transformer.load(Path(mistral_models_path), node_id, gpu, group)
+
+    else:
+        snapshot_download(
+            repo_id=repo_id,
+            allow_patterns=[
+                "params.json",
+                "consolidated.safetensors",
+                "tokenizer.model.v3",
+            ],
+            local_dir=mistral_models_path,
+        )
+        tokenizer = MistralTokenizer.from_file(
+            f"{mistral_models_path}/tokenizer.model.v3"
+        )
+        model = Transformer.from_folder(mistral_models_path)
+
     return model, tokenizer
 
 
 def run_default(
     model_path: str,
-    max_token: int,
+    max_tokens: int,
     T: float,
     P: float,
     mode: str,
@@ -70,7 +95,7 @@ def run_default(
         out_tokens, _ = generate(
             [tokens],
             model,
-            max_tokens=max_token,
+            max_tokens=max_tokens,
             temperature=args.T,
             eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
         )
@@ -86,7 +111,7 @@ def run_default(
             out_tokens, _ = generate(
                 [tokens],
                 model,
-                max_tokens=max_token,
+                max_tokens=max_tokens,
                 temperature=args.T,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
@@ -103,7 +128,7 @@ def run_default(
             out_tokens, _ = profile_generate(
                 [tokens],
                 model,
-                max_tokens=max_token,
+                max_tokens=max_tokens,
                 temperature=args.T,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
@@ -121,7 +146,7 @@ def run_default(
             generate(
                 [tokens],
                 model,
-                max_tokens=max_token,
+                max_tokens=max_tokens,
                 temperature=args.T,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
@@ -136,7 +161,7 @@ def run_default(
             out_tokens, _, TPOTs = measure_generate(
                 [tokens],
                 model,
-                max_tokens=max_token,
+                max_tokens=max_tokens,
                 temperature=args.T,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
@@ -148,6 +173,26 @@ def run_default(
             # print(result)
 
 
+def run_dist(
+    model_path: str,
+    max_token: int,
+    T: float,
+    P: float,
+    mode: str,
+    prompts: list,
+    eval_nItrs: int,
+    warmup_iters: int,
+):
+
+    gpu = torch.device(f"cuda:{LOCAL_RANK}")
+    dist.init_process_group(
+        "nccl", rank=WORLD_RANK, world_size=WORLD_SIZE, device_id=gpu
+    )
+    group = dist.new_group(list(range(WORLD_SIZE)), use_local_synchronization=True)
+    model, tokenizer = getModelandTokenizeer(model_path, True, NODE_RANK, gpu, group)
+    model.eval()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=17, help="random seed")
@@ -156,7 +201,7 @@ if __name__ == "__main__":
         type=str,
         default="mistral_weights/Mistral-7B-Instruct-v0.3",
     )
-    parser.add_argument("--max_token", type=int, default=128)
+    parser.add_argument("--max_tokens", type=int, default=128)
     parser.add_argument("--T", type=float, default=0.6, help="temperature")
     parser.add_argument("--P", type=float, default=0.9, help="top_p")
     parser.add_argument(
@@ -173,18 +218,35 @@ if __name__ == "__main__":
     )
     parser.add_argument("--eval_nItrs", type=int, default=0)
     parser.add_argument("--warmup_iters", type=int, default=5)
-    parser.add_argument("--torch_compile", type=eval, default=False)
+    parser.add_argument("--node-id", type=int)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--local_rank", type=int, default=0)
+    # parser.add_argument("--torch_compile", type=eval, default=False)
     args = parser.parse_args()
 
     setup_seed(args.seed)
     prompts = load_data(args.benchmark)
 
     if "WORLD_SIZE" in os.environ:
-        pass
+        LOCAL_RANK = int(os.environ["LOCAL_RANK"])
+        LOCAL_WORLD_SIZE = int(os.environ["LOCAL_WORLD_SIZE"])
+        WORLD_SIZE = int(os.environ["WORLD_SIZE"])
+        WORLD_RANK = int(os.environ["RANK"])
+        NODE_RANK = WORLD_RANK // LOCAL_WORLD_SIZE
+        run_dist(
+            args.model_path,
+            args.max_tokens,
+            args.T,
+            args.P,
+            args.mode,
+            prompts,
+            args.eval_nItrs,
+            args.warmup_iters,
+        )
     else:
         run_default(
             args.model_path,
-            args.max_token,
+            args.max_tokens,
             args.T,
             args.P,
             args.mode,
