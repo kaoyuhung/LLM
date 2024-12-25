@@ -20,6 +20,7 @@ from tqdm import tqdm
 def getModelandTokenizeer(
     model_name,
     mistral_models_path,
+    max_batch_size,
     distributed=False,
     node_id=None,
     gpu=None,
@@ -52,7 +53,10 @@ def getModelandTokenizeer(
             tokenizer_path = f"{mistral_models_path}/tokenizer.model.v3"
             tokenizer = MistralTokenizer.from_file(tokenizer_path)
             model = Transformer.from_folder(
-                folder=mistral_models_path, num_pipeline_ranks=WORLD_SIZE, device=gpu
+                folder=mistral_models_path,
+                max_batch_size=max_batch_size,
+                num_pipeline_ranks=WORLD_SIZE,
+                device=gpu,
             )
 
         elif model_name == "Mixtral-8x7B-Instruct-v0.1":
@@ -63,7 +67,10 @@ def getModelandTokenizeer(
             #     f"{mistral_models_path}/experts.pt", NODE_RANK, gpu, group
             # )
             model = Transformer.from_folder(
-                folder=mistral_models_path, num_pipeline_ranks=WORLD_SIZE, device=gpu
+                folder=mistral_models_path,
+                max_batch_size=max_batch_size,
+                num_pipeline_ranks=WORLD_SIZE,
+                device=gpu,
             )
 
     else:
@@ -71,7 +78,9 @@ def getModelandTokenizeer(
             tokenizer_path = f"{mistral_models_path}/tokenizer.model.v3"
             tokenizer = MistralTokenizer.from_file(tokenizer_path)
 
-        model = Transformer.from_folder(mistral_models_path)
+        model = Transformer.from_folder(
+            mistral_models_path, max_batch_size=max_batch_size
+        )
 
     return model, tokenizer
 
@@ -86,9 +95,10 @@ def run_default(
     prompts: list,
     eval_nItrs: int,
     warmup_iters: int,
+    batch_size: int,
 ):
 
-    model, tokenizer = getModelandTokenizeer(model_name, model_path)
+    model, tokenizer = getModelandTokenizeer(model_name, model_path, batch_size)
     device = torch.device("cuda")
     model.to(device)
     model.eval()
@@ -96,7 +106,9 @@ def run_default(
     # if args.torch_compile:
     #     model = torch.compile(model, mode="reduce-overhead")
 
-    eval_nItrs = min(len(prompts), eval_nItrs) if eval_nItrs else len(prompts)
+    eval_nItrs = (
+        min(len(prompts) // batch_size, eval_nItrs) if eval_nItrs else len(prompts)
+    )
 
     if mode == "printModel":
         summary(
@@ -105,19 +117,34 @@ def run_default(
         )
 
     elif mode == "genText":
-        completion_request = ChatCompletionRequest(
-            messages=[UserMessage(content=prompts[0])]
-        )
-        tokens = tokenizer.encode_chat_completion(completion_request).tokens
-        out_tokens, _ = generate(
-            [tokens],
-            model,
-            max_tokens=max_tokens,
-            temperature=args.T,
-            eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-        )
-        result = tokenizer.instruct_tokenizer.tokenizer.decode(out_tokens[0])
-        print(result)
+        for i in range(eval_nItrs):
+            inputs = []
+            for id in range(batch_size):
+                prompt_id = i * batch_size + id
+                prompts[prompt_id] = (
+                    "[INST]" + prompts[prompt_id] + "[/INST]" + "\n\nASSISTANT:"
+                )
+                completion_request = ChatCompletionRequest(
+                    messages=[UserMessage(content=prompts[prompt_id])]
+                )
+                tokens = tokenizer.encode_chat_completion(completion_request).tokens
+                inputs.append(tokens)
+
+            out_tokens, _ = generate(
+                inputs,
+                model,
+                max_tokens=max_tokens,
+                temperature=args.T,
+                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            )
+
+            for id in range(batch_size):
+                prompt_id = i * batch_size + id
+                result = tokenizer.instruct_tokenizer.tokenizer.decode(
+                    out_tokens[prompt_id]
+                )
+                print(f"{prompts[prompt_id]}{result}")
+                print("-" * 100)
 
     elif mode == "nsys_profile":
         completion_request = ChatCompletionRequest(
@@ -156,25 +183,38 @@ def run_default(
             )
 
         for i in range(eval_nItrs):
-            prompt = "[INST]" + prompts[i] + "[/INST]" + "\n\nASSISTANT:"
-            # print(prompt, end=" ", flush=True)
-            completion_request = ChatCompletionRequest(
-                messages=[UserMessage(content=prompt)]
-            )
-            tokens = tokenizer.encode_chat_completion(completion_request).tokens
+            inputs = []
+            for id in range(batch_size):
+                prompt_id = i * batch_size + id
+                prompts[prompt_id] = (
+                    "[INST]" + prompts[prompt_id] + "[/INST]" + "\n\nASSISTANT:"
+                )
+                completion_request = ChatCompletionRequest(
+                    messages=[UserMessage(content=prompts[prompt_id])]
+                )
+                tokens = tokenizer.encode_chat_completion(completion_request).tokens
+                inputs.append(tokens)
+
+            n_prefill_token = len(sum(inputs, []))
             out_tokens, _, TPOTs = measure_generate(
-                [tokens],
+                inputs,
                 model,
                 max_tokens=max_tokens,
                 temperature=args.T,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
+            n_decode_token = len(sum(out_tokens, []))
+
+            for id in range(batch_size):
+                prompt_id = i * batch_size + id
+                result = tokenizer.instruct_tokenizer.tokenizer.decode(out_tokens[id])
+                print(f"{prompts[prompt_id]}{result}\n")
+
+            print(f"evalItr{i}(batch_size={batch_size})")
             print(
-                f"{i} TTFT: {TPOTs[0]:.2f}ms, TPOT: {sum(TPOTs[1:]) / len(TPOTs[1:]):.2f} ms, #gen_token: {len(TPOTs)}"
+                f"TTFT: {TPOTs[0]:.2f}ms, TPOT: {sum(TPOTs[1:]) / len(TPOTs[1:]):.2f} ms, Prefill throughput: {n_prefill_token/(TPOTs[0]/1000):.2f} tokens/s, Decode throughtput: {n_decode_token/(sum(TPOTs[1:])/ 1000):.2f} tokens/s"
             )
             print("-" * 100)
-            # result = tokenizer.instruct_tokenizer.tokenizer.decode(out_tokens[0])
-            # print(result)
 
 
 def run_dist(
@@ -187,31 +227,51 @@ def run_dist(
     eval_nItrs: int,
     warmup_iters: int,
     benchmark: str,
+    batch_size: int,
 ):
 
     gpu = torch.device(f"cuda:{LOCAL_RANK}")
+    torch.cuda.set_device(gpu)
     dist.init_process_group(
         "nccl", rank=WORLD_RANK, world_size=WORLD_SIZE, device_id=gpu
     )
     group = dist.new_group(list(range(WORLD_SIZE)), use_local_synchronization=True)
     prompts = load_data(benchmark, "../dataset", True, LOCAL_RANK, group)
     model, tokenizer = getModelandTokenizeer(
-        model_name, model_path, True, NODE_RANK, gpu, group
+        model_name, model_path, batch_size, True, NODE_RANK, gpu, group
     )
     model.eval()
 
     if mode == "genText":
-        completion_request = ChatCompletionRequest(
-            messages=[UserMessage(content=prompts[0])]
-        )
-        tokens = tokenizer.encode_chat_completion(completion_request).tokens
-        out_tokens, _ = generate(
-            [tokens],
-            model,
-            max_tokens=max_tokens,
-            temperature=args.T,
-            eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-        )
+        for i in range(eval_nItrs):
+            inputs = []
+            for id in range(batch_size):
+                prompt_id = i * batch_size + id
+                prompts[prompt_id] = (
+                    "[INST]" + prompts[prompt_id] + "[/INST]" + "\n\nASSISTANT:"
+                )
+                completion_request = ChatCompletionRequest(
+                    messages=[UserMessage(content=prompts[prompt_id])]
+                )
+                tokens = tokenizer.encode_chat_completion(completion_request).tokens
+                inputs.append(tokens)
+
+            out_tokens, _ = generate(
+                inputs,
+                model,
+                max_tokens=max_tokens,
+                temperature=args.T,
+                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            )
+
+            if WORLD_RANK == WORLD_SIZE - 1:
+                for id in range(batch_size):
+                    prompt_id = i * batch_size + id
+                    result = tokenizer.instruct_tokenizer.tokenizer.decode(
+                        out_tokens[id]
+                    )
+                    print(f"{prompts[prompt_id]}{result}")
+                    print("-" * 100)
 
         if WORLD_RANK == WORLD_SIZE - 1:
             result = tokenizer.instruct_tokenizer.tokenizer.decode(out_tokens[0])
@@ -225,10 +285,17 @@ def run_dist(
         )
         tokens = tokenizer.encode_chat_completion(completion_request).tokens
 
-        with tqdm(total=warmup_iters, desc="GPU warmup") as pbar:
+        if LOCAL_RANK == 0:
+            for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
+                generate(
+                    [tokens],
+                    model,
+                    max_tokens=max_tokens,
+                    temperature=args.T,
+                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                )
+        else:
             for _ in range(warmup_iters):
-                if LOCAL_RANK == 0:
-                    pbar.update(1)
                 generate(
                     [tokens],
                     model,
@@ -238,23 +305,39 @@ def run_dist(
                 )
 
         for i in range(eval_nItrs):
-            prompt = "[INST]" + prompts[i] + "[/INST]" + "\n\nASSISTANT:"
-            # print(prompt, end=" ", flush=True)
-            completion_request = ChatCompletionRequest(
-                messages=[UserMessage(content=prompt)]
-            )
-            tokens = tokenizer.encode_chat_completion(completion_request).tokens
+            inputs = []
+            for id in range(batch_size):
+                prompt_id = i * batch_size + id
+                prompts[prompt_id] = (
+                    "[INST]" + prompts[prompt_id] + "[/INST]" + "\n\nASSISTANT:"
+                )
+                completion_request = ChatCompletionRequest(
+                    messages=[UserMessage(content=prompts[prompt_id])]
+                )
+                tokens = tokenizer.encode_chat_completion(completion_request).tokens
+                inputs.append(tokens)
+
+            n_prefill_token = len(sum(inputs, []))
             out_tokens, _, TPOTs = measure_generate(
-                [tokens],
+                inputs,
                 model,
                 max_tokens=max_tokens,
                 temperature=args.T,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
+            n_decode_token = len(sum(out_tokens, []))
 
             if LOCAL_RANK == 0:
+                for id in range(batch_size):
+                    prompt_id = i * batch_size + id
+                    result = tokenizer.instruct_tokenizer.tokenizer.decode(
+                        out_tokens[id]
+                    )
+                    print(f"{prompts[prompt_id]}{result}\n")
+
+                print(f"evalItr{i}(batch_size={batch_size})")
                 print(
-                    f"{i} TTFT: {TPOTs[0]:.2f}ms, TPOT: {sum(TPOTs[1:]) / len(TPOTs[1:]):.2f} ms, #gen_token: {len(TPOTs)}"
+                    f"TTFT: {TPOTs[0]:.2f}ms, TPOT: {sum(TPOTs[1:]) / len(TPOTs[1:]):.2f} ms, Prefill throughput: {n_prefill_token/(TPOTs[0]/1000):.2f} tokens/s, Decode throughtput: {n_decode_token/(sum(TPOTs[1:])/ 1000):.2f} tokens/s"
                 )
                 print("-" * 100)
 
@@ -265,10 +348,17 @@ def run_dist(
             messages=[UserMessage(content=prompts[0])]
         )
         tokens = tokenizer.encode_chat_completion(completion_request).tokens
-        with tqdm(total=warmup_iters, desc="GPU warmup") as pbar:
+        if LOCAL_RANK == 0:
+            for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
+                generate(
+                    [tokens],
+                    model,
+                    max_tokens=max_tokens,
+                    temperature=args.T,
+                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                )
+        else:
             for _ in range(warmup_iters):
-                if LOCAL_RANK == 0:
-                    pbar.update(1)
                 generate(
                     [tokens],
                     model,
@@ -277,14 +367,17 @@ def run_dist(
                     eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
                 )
 
+        dist.barrier(group=group)
         out_tokens, _ = profile_generate(
             [tokens],
             model,
             max_tokens=2,
             temperature=args.T,
             eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            distributed=True,
+            local_rank=LOCAL_RANK,
+            local_work_size=LOCAL_WORLD_SIZE,
         )
-
         dist.barrier(group=group)
 
 
@@ -318,9 +411,9 @@ if __name__ == "__main__":
         choices=["mt_bench", "vicuna_bench"],
     )
     parser.add_argument("--eval_nItrs", type=int, default=0)
-    parser.add_argument("--warmup_iters", type=int, default=5)
+    parser.add_argument("--warmup_iters", type=int, default=3)
     parser.add_argument("--node-id", type=int)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--local_rank", type=int, default=0)
     # parser.add_argument("--torch_compile", type=eval, default=False)
     args = parser.parse_args()
@@ -333,6 +426,9 @@ if __name__ == "__main__":
         WORLD_SIZE = int(os.environ["WORLD_SIZE"])
         WORLD_RANK = int(os.environ["RANK"])
         NODE_RANK = WORLD_RANK // LOCAL_WORLD_SIZE
+        os.environ["CUDA_VISIBLE_DEVICES"] = (
+            f"{LOCAL_RANK}"  # Set visible GPUs to 0 and 2
+        )
         run_dist(
             args.model,
             args.model_path,
@@ -343,6 +439,7 @@ if __name__ == "__main__":
             args.eval_nItrs,
             args.warmup_iters,
             args.benchmark,
+            args.batch_size,
         )
 
         dist.destroy_process_group()
@@ -358,4 +455,5 @@ if __name__ == "__main__":
             prompts,
             args.eval_nItrs,
             args.warmup_iters,
+            args.batch_size,
         )

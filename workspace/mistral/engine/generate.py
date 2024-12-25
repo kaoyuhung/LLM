@@ -2,10 +2,14 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
+import time
+
+# from mistral_inference.cache import BufferCache
 
 from engine.cache import BufferCache
 from mistral_inference.mamba import Mamba
 from mistral_inference.transformer import Transformer
+from util import timed
 
 
 @torch.inference_mode()
@@ -16,6 +20,8 @@ def measure_generate(
     temperature: float,
     # chunk_size: Optional[int] = None,
     eos_id: Optional[int] = None,
+    distribued=False,
+    local_rank=None,
 ):
 
     B, V = len(encoded_prompts), model.args.vocab_size
@@ -40,19 +46,32 @@ def measure_generate(
 
     assert all(len(p) > 0 for p in encoded_prompts)
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    # start_event = torch.cuda.Event(enable_timing=True)
+    # end_event = torch.cuda.Event(enable_timing=True)
     TPOTs = []
 
-    start_event.record()
+    # start_event.record()
+
+    # prelogits, time = timed(
+    #     model,
+    #     False,
+    #     torch.tensor(sum(encoded_prompts, []), device=model.device, dtype=torch.long),
+    #     seqlens=[len(p) for p in encoded_prompts],
+    #     cache=cache,
+    # )
+    # TPOTs.append(time)
+    input_ids = sum(encoded_prompts, [])
+    t = time.time()
     prelogits = model.forward(
-        torch.tensor(sum(encoded_prompts, []), device=model.device, dtype=torch.long),
+        torch.tensor(input_ids, device=model.device, dtype=torch.long),
         seqlens=[len(p) for p in encoded_prompts],
         cache=cache,
     )
-    end_event.record()
     torch.cuda.synchronize()
-    TPOTs.append(start_event.elapsed_time(end_event))
+    TPOTs.append((time.time() - t) * 1000)
+    # end_event.record()
+    # torch.cuda.synchronize()
+    # TPOTs.append(start_event.elapsed_time(end_event))
 
     logits = torch.log_softmax(prelogits, dim=-1)
 
@@ -97,11 +116,18 @@ def measure_generate(
 
         generated_tensors.append(next_token[:, None])
 
-        start_event.record()
+        # start_event.record()
+        t = time.time()
         last_token_prelogits = model.forward(next_token, seqlens=[1] * B, cache=cache)
-        end_event.record()
         torch.cuda.synchronize()
-        TPOTs.append(start_event.elapsed_time(end_event))
+        TPOTs.append((time.time() - t) * 1000)
+        # last_token_logits, time = timed(
+        #     model, False, next_token, seqlens=[1] * B, cache=cache
+        # )
+        # TPOTs.append(time)
+        # end_event.record()
+        # torch.cuda.synchronize()
+        # TPOTs.append(start_event.elapsed_time(end_event))
 
         assert last_token_prelogits.shape == (B, V)
 
@@ -122,6 +148,9 @@ def profile_generate(
     temperature: float,
     # chunk_size: Optional[int] = None,
     eos_id: Optional[int] = None,
+    distributed=False,
+    local_rank=None,
+    local_work_size=None,
 ):
 
     B, V = len(encoded_prompts), model.args.vocab_size
@@ -146,18 +175,26 @@ def profile_generate(
 
     assert all(len(p) > 0 for p in encoded_prompts)
 
-    torch.cuda.cudart().cudaProfilerStart()
-    torch.cuda.nvtx.range_push("prefill forward")
+    if not distributed or local_rank == 0:
+        torch.cuda.cudart().cudaProfilerStart()
+        torch.cuda.nvtx.range_push("prefill forward")
+
     prelogits = model.forward_profile(
         torch.tensor(sum(encoded_prompts, []), device=model.device, dtype=torch.long),
         seqlens=[len(p) for p in encoded_prompts],
         cache=cache,
     )
-    torch.cuda.nvtx.range_pop()
 
-    torch.cuda.nvtx.range_push("log_softmax")
+    if not distributed or local_rank == 0:
+        torch.cuda.nvtx.range_pop()
+
+    if not distributed or local_rank == 0:
+        torch.cuda.nvtx.range_push("log_softmax")
+
     logits = torch.log_softmax(prelogits, dim=-1)
-    torch.cuda.nvtx.range_pop()
+
+    if not distributed or local_rank == 0:
+        torch.cuda.nvtx.range_pop()
 
     offset = 0
     for i_seq, sequence in enumerate(encoded_prompts):
@@ -185,9 +222,13 @@ def profile_generate(
     assert last_token_prelogits is not None
     for _ in range(max_tokens):
 
-        torch.cuda.nvtx.range_push("sample next token")
+        if not distributed or local_rank == 0:
+            torch.cuda.nvtx.range_push("sample next token")
+
         next_token = sample(last_token_prelogits, temperature=temperature, top_p=0.8)
-        torch.cuda.nvtx.range_pop()
+
+        if not distributed or local_rank == 0:
+            torch.cuda.nvtx.range_pop()
 
         if eos_id is not None:
             is_finished = is_finished | (next_token == eos_id).cpu()
@@ -195,23 +236,33 @@ def profile_generate(
         if is_finished.all():
             break
 
-        torch.cuda.nvtx.range_push("log_softmax")
+        if not distributed or local_rank == 0:
+            torch.cuda.nvtx.range_push("log_softmax")
+
         last_token_logits = torch.log_softmax(last_token_prelogits, dim=-1)
-        torch.cuda.nvtx.range_pop()
+
+        if not distributed or local_rank == 0:
+            torch.cuda.nvtx.range_pop()
+
         for i in range(B):
             logprobs[i].append(last_token_logits[i, next_token[i]].item())
 
         generated_tensors.append(next_token[:, None])
 
-        torch.cuda.nvtx.range_push("decode forward")
+        if not distributed or local_rank == 0:
+            torch.cuda.nvtx.range_push("decode forward")
+
         last_token_prelogits = model.forward_profile(
             next_token, seqlens=[1] * B, cache=cache
         )
-        torch.cuda.nvtx.range_pop()
+
+        if not distributed or local_rank == 0:
+            torch.cuda.nvtx.range_pop()
 
         assert last_token_prelogits.shape == (B, V)
 
-    torch.cuda.cudart().cudaProfilerStop()
+    if not distributed or local_rank == 0:
+        torch.cuda.cudart().cudaProfilerStop()
 
     generated_tokens: List[List[int]]
     if generated_tensors:

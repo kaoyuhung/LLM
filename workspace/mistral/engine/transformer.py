@@ -10,6 +10,9 @@ import torch
 from torch import nn
 
 from mistral_inference.args import TransformerArgs
+
+# from mistral_inference.cache import BufferCache, CacheInputMetadata
+
 from engine.cache import BufferCache, CacheInputMetadata
 from mistral_inference.lora import LoRALoaderMixin
 from mistral_inference.model import ModelBase
@@ -380,7 +383,9 @@ class Transformer(ModelBase, LoRALoaderMixin):
             else:
                 cache_view = None
             # print(cache_view.mask.q_seqinfo.seqstart.device)
-            torch.cuda.nvtx.range_push(f"local_layer_id={local_layer_id} forward")
+            torch.cuda.nvtx.range_push(
+                f"pp rank={self.pipeline_rank}, local_layer_id={local_layer_id} forward"
+            )
             h = layer(h, freqs_cis, cache_view)
             torch.cuda.nvtx.range_pop()
 

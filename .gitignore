@@ -5,3 +5,4 @@ ntu_paslab_llm
 workspace/dataset
 *weights
 *.nsys-rep
+result
