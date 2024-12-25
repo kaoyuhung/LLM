@@ -23,6 +23,7 @@ def measure_generate(
     distribued=False,
     local_rank=None,
 ):
+    t, TPOTs = time.time(), []
 
     B, V = len(encoded_prompts), model.args.vocab_size
     seqlens = [len(x) for x in encoded_prompts]
@@ -46,33 +47,12 @@ def measure_generate(
 
     assert all(len(p) > 0 for p in encoded_prompts)
 
-    # start_event = torch.cuda.Event(enable_timing=True)
-    # end_event = torch.cuda.Event(enable_timing=True)
-    TPOTs = []
-
-    # start_event.record()
-
-    # prelogits, time = timed(
-    #     model,
-    #     False,
-    #     torch.tensor(sum(encoded_prompts, []), device=model.device, dtype=torch.long),
-    #     seqlens=[len(p) for p in encoded_prompts],
-    #     cache=cache,
-    # )
-    # TPOTs.append(time)
     input_ids = sum(encoded_prompts, [])
-    t = time.time()
     prelogits = model.forward(
         torch.tensor(input_ids, device=model.device, dtype=torch.long),
         seqlens=[len(p) for p in encoded_prompts],
         cache=cache,
     )
-    torch.cuda.synchronize()
-    TPOTs.append((time.time() - t) * 1000)
-    # end_event.record()
-    # torch.cuda.synchronize()
-    # TPOTs.append(start_event.elapsed_time(end_event))
-
     logits = torch.log_softmax(prelogits, dim=-1)
 
     offset = 0
@@ -99,8 +79,12 @@ def measure_generate(
     is_finished = torch.tensor([False for _ in range(B)])
 
     assert last_token_prelogits is not None
-    for _ in range(max_tokens):
 
+    torch.cuda.synchronize()
+    TPOTs.append((time.time() - t) * 1000)
+
+    for _ in range(max_tokens):
+        t = time.time()
         next_token = sample(last_token_prelogits, temperature=temperature, top_p=0.8)
 
         if eos_id is not None:
@@ -116,18 +100,10 @@ def measure_generate(
 
         generated_tensors.append(next_token[:, None])
 
-        # start_event.record()
-        t = time.time()
         last_token_prelogits = model.forward(next_token, seqlens=[1] * B, cache=cache)
+
         torch.cuda.synchronize()
         TPOTs.append((time.time() - t) * 1000)
-        # last_token_logits, time = timed(
-        #     model, False, next_token, seqlens=[1] * B, cache=cache
-        # )
-        # TPOTs.append(time)
-        # end_event.record()
-        # torch.cuda.synchronize()
-        # TPOTs.append(start_event.elapsed_time(end_event))
 
         assert last_token_prelogits.shape == (B, V)
 

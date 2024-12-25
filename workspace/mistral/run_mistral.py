@@ -22,7 +22,7 @@ def getModelandTokenizeer(
     mistral_models_path,
     max_batch_size,
     distributed=False,
-    node_id=None,
+    node_rank=None,
     gpu=None,
     group=None,
 ):
@@ -43,7 +43,7 @@ def getModelandTokenizeer(
     if model_name == "Mistral-7B-Instruct-v0.3":
         tokenizer_path = f"{mistral_models_path}/tokenizer.model.v3"
 
-    elif model_name == "Mixtral-8x7B-Instruct-v0.1":
+    elif model_name == "Mistral-8x7B-Instruct-v0.1":
         tokenizer_path = f"{mistral_models_path}/tokenizer.model"
 
     if distributed:
@@ -59,10 +59,10 @@ def getModelandTokenizeer(
                 device=gpu,
             )
 
-        elif model_name == "Mixtral-8x7B-Instruct-v0.1":
-            # tokenizer = MistralTokenizer.v1()
-            tokenizer_path = f"{mistral_models_path}/tokenizer.model"
-            tokenizer = MistralTokenizer.from_file(tokenizer_path)
+        elif model_name == "Mistral-8x7B-Instruct-v0.1":
+            tokenizer = MistralTokenizer.v1()
+            # tokenizer_path = f"{mistral_models_path}/tokenizer.model"
+            # tokenizer = MistralTokenizer.from_file(tokenizer_path)
             # model = Transformer.load(
             #     f"{mistral_models_path}/experts.pt", NODE_RANK, gpu, group
             # )
@@ -143,7 +143,7 @@ def run_default(
                 result = tokenizer.instruct_tokenizer.tokenizer.decode(
                     out_tokens[prompt_id]
                 )
-                print(f"{prompts[prompt_id]}{result}")
+                print(f"{prompts[prompt_id]} {result}")
                 print("-" * 100)
 
     elif mode == "nsys_profile":
@@ -169,8 +169,9 @@ def run_default(
         )
 
     elif mode == "measure":
+        prompt = "[INST]" + prompts[0] + "[/INST]" + "\n\nASSISTANT:"
         completion_request = ChatCompletionRequest(
-            messages=[UserMessage(content=prompts[0])]
+            messages=[UserMessage(content=prompt)]
         )
         tokens = tokenizer.encode_chat_completion(completion_request).tokens
         for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
@@ -182,20 +183,10 @@ def run_default(
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
 
-        for i in range(eval_nItrs):
-            inputs = []
-            for id in range(batch_size):
-                prompt_id = i * batch_size + id
-                prompts[prompt_id] = (
-                    "[INST]" + prompts[prompt_id] + "[/INST]" + "\n\nASSISTANT:"
-                )
-                completion_request = ChatCompletionRequest(
-                    messages=[UserMessage(content=prompts[prompt_id])]
-                )
-                tokens = tokenizer.encode_chat_completion(completion_request).tokens
-                inputs.append(tokens)
+        inputs = [tokens for _ in range(batch_size)]
+        n_prefill_token = len(sum(inputs, []))
 
-            n_prefill_token = len(sum(inputs, []))
+        for i in range(eval_nItrs):
             out_tokens, _, TPOTs = measure_generate(
                 inputs,
                 model,
@@ -205,12 +196,7 @@ def run_default(
             )
             n_decode_token = len(sum(out_tokens, []))
 
-            for id in range(batch_size):
-                prompt_id = i * batch_size + id
-                result = tokenizer.instruct_tokenizer.tokenizer.decode(out_tokens[id])
-                print(f"{prompts[prompt_id]}{result}\n")
-
-            print(f"evalItr{i}(batch_size={batch_size})")
+            print(f"evalItr{i} (batch_size={batch_size})")
             print(
                 f"TTFT: {TPOTs[0]:.2f}ms, TPOT: {sum(TPOTs[1:]) / len(TPOTs[1:]):.2f} ms, Prefill throughput: {n_prefill_token/(TPOTs[0]/1000):.2f} tokens/s, Decode throughtput: {n_decode_token/(sum(TPOTs[1:])/ 1000):.2f} tokens/s"
             )
@@ -229,7 +215,6 @@ def run_dist(
     benchmark: str,
     batch_size: int,
 ):
-
     gpu = torch.device(f"cuda:{LOCAL_RANK}")
     torch.cuda.set_device(gpu)
     dist.init_process_group(
@@ -264,24 +249,21 @@ def run_dist(
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
 
-            if WORLD_RANK == WORLD_SIZE - 1:
+            if LOCAL_RANK == LOCAL_WORLD_SIZE - 1:
                 for id in range(batch_size):
                     prompt_id = i * batch_size + id
                     result = tokenizer.instruct_tokenizer.tokenizer.decode(
                         out_tokens[id]
                     )
-                    print(f"{prompts[prompt_id]}{result}")
+                    print(f"{prompts[prompt_id]} {result}")
                     print("-" * 100)
-
-        if WORLD_RANK == WORLD_SIZE - 1:
-            result = tokenizer.instruct_tokenizer.tokenizer.decode(out_tokens[0])
-            print(result)
 
         dist.barrier(group=group)
 
     elif mode == "measure":
+        prompt = "[INST]" + prompts[0] + "[/INST]" + "\n\nASSISTANT:"
         completion_request = ChatCompletionRequest(
-            messages=[UserMessage(content=prompts[0])]
+            messages=[UserMessage(content=prompt)]
         )
         tokens = tokenizer.encode_chat_completion(completion_request).tokens
 
@@ -304,20 +286,10 @@ def run_dist(
                     eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
                 )
 
-        for i in range(eval_nItrs):
-            inputs = []
-            for id in range(batch_size):
-                prompt_id = i * batch_size + id
-                prompts[prompt_id] = (
-                    "[INST]" + prompts[prompt_id] + "[/INST]" + "\n\nASSISTANT:"
-                )
-                completion_request = ChatCompletionRequest(
-                    messages=[UserMessage(content=prompts[prompt_id])]
-                )
-                tokens = tokenizer.encode_chat_completion(completion_request).tokens
-                inputs.append(tokens)
+        inputs = [tokens for _ in range(batch_size)]
+        n_prefill_token = len(sum(inputs, []))
 
-            n_prefill_token = len(sum(inputs, []))
+        for i in range(eval_nItrs):
             out_tokens, _, TPOTs = measure_generate(
                 inputs,
                 model,
@@ -328,16 +300,9 @@ def run_dist(
             n_decode_token = len(sum(out_tokens, []))
 
             if LOCAL_RANK == 0:
-                for id in range(batch_size):
-                    prompt_id = i * batch_size + id
-                    result = tokenizer.instruct_tokenizer.tokenizer.decode(
-                        out_tokens[id]
-                    )
-                    print(f"{prompts[prompt_id]}{result}\n")
-
-                print(f"evalItr{i}(batch_size={batch_size})")
+                print(f"evalItr{i} (batch_size={batch_size})")
                 print(
-                    f"TTFT: {TPOTs[0]:.2f}ms, TPOT: {sum(TPOTs[1:]) / len(TPOTs[1:]):.2f} ms, Prefill throughput: {n_prefill_token/(TPOTs[0]/1000):.2f} tokens/s, Decode throughtput: {n_decode_token/(sum(TPOTs[1:])/ 1000):.2f} tokens/s"
+                    f"TTFT: {TPOTs[0]:.2f} ms, TPOT: {sum(TPOTs[1:]) / len(TPOTs[1:]):.2f} ms, Prefill throughput: {n_prefill_token/(TPOTs[0]/1000):.2f} tokens/s, Decode throughtput: {n_decode_token/(sum(TPOTs[1:])/ 1000):.2f} tokens/s"
                 )
                 print("-" * 100)
 
@@ -388,7 +353,7 @@ if __name__ == "__main__":
         "--model",
         type=str,
         required=True,
-        choices=["Mistral-7B-Instruct-v0.3", "Mixtral-8x7B-Instruct-v0.1"],
+        choices=["Mistral-7B-Instruct-v0.3", "Mistral-8x7B-Instruct-v0.1"],
     )
     parser.add_argument(
         "--model_path",
@@ -414,7 +379,7 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_iters", type=int, default=3)
     parser.add_argument("--node-id", type=int)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--local_rank", type=int, default=0)
+    parser.add_argument("--node_rank", type=int, default=0)
     # parser.add_argument("--torch_compile", type=eval, default=False)
     args = parser.parse_args()
 
@@ -425,7 +390,7 @@ if __name__ == "__main__":
         LOCAL_WORLD_SIZE = int(os.environ["LOCAL_WORLD_SIZE"])
         WORLD_SIZE = int(os.environ["WORLD_SIZE"])
         WORLD_RANK = int(os.environ["RANK"])
-        NODE_RANK = WORLD_RANK // LOCAL_WORLD_SIZE
+        NODE_RANK = args.node_rank
         os.environ["CUDA_VISIBLE_DEVICES"] = (
             f"{LOCAL_RANK}"  # Set visible GPUs to 0 and 2
         )

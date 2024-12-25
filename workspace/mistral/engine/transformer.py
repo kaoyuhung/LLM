@@ -417,30 +417,30 @@ class Transformer(ModelBase, LoRALoaderMixin):
         else:
             return outs
 
-    # @staticmethod
-    # def load(
-    #     model_path: Path, node_id: int, local_rank: int, gpu: torch.device, group
-    # ) -> "Transformer":
+    @staticmethod
+    def load(
+        model_path: Path, node_id: int, local_rank: int, gpu: torch.device, group
+    ) -> "Transformer":
 
-    #     with open(Path(model_path) / "params.json", "r") as f:
-    #         model_args = TransformerArgs.from_dict(json.load(f))
+        with open(Path(model_path) / "params.json", "r") as f:
+            model_args = TransformerArgs.from_dict(json.load(f))
 
-    #     # model_args = ModelArgs.from_hf_config(get_json(model_path / "config.json"))
-    #     non_experts = torch.load(
-    #         model_path / "non-experts-1-0.pt",
-    #         map_location=gpu,
-    #         weights_only=True,
-    #         mmap=True,
-    #     )
-    #     experts = torch.load(
-    #         model_path / f"experts-{node_id + LOCAL_RANK}.pt",
-    #         map_location=gpu,
-    #         weights_only=True,
-    #         mmap=True,
-    #     )
+        # model_args = ModelArgs.from_hf_config(get_json(model_path / "config.json"))
+        non_experts = torch.load(
+            model_path / "non-experts-1-0.pt",
+            map_location=gpu,
+            weights_only=True,
+            mmap=True,
+        )
+        experts = torch.load(
+            model_path / f"experts-{node_id + LOCAL_RANK}.pt",
+            map_location=gpu,
+            weights_only=True,
+            mmap=True,
+        )
 
-    #     with torch.device("meta"):
-    #         model = Transformer(args=model_args, experts=Experts(experts), group=group)
-    #     model.load_state_dict(non_experts, assign=True, strict=True)
+        with torch.device("meta"):
+            model = Transformer(args=model_args, experts=Experts(experts), group=group)
+        model.load_state_dict(non_experts, assign=True, strict=True)
 
-    #     return model
+        return model
