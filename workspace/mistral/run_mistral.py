@@ -21,9 +21,10 @@ def getModelandTokenizeer(
     model_name,
     mistral_models_path,
     max_batch_size,
+    gpu,
+    dtype,
     distributed=False,
     node_rank=None,
-    gpu=None,
     group=None,
 ):
 
@@ -43,34 +44,30 @@ def getModelandTokenizeer(
     if model_name == "Mistral-7B-Instruct-v0.3":
         tokenizer_path = f"{mistral_models_path}/tokenizer.model.v3"
 
-    elif model_name == "Mistral-8x7B-Instruct-v0.1":
+    elif model_name == "Mixtral-8x7B-Instruct-v0.1":
         tokenizer_path = f"{mistral_models_path}/tokenizer.model"
 
     if distributed:
-        dist.barrier(group=group)
+        dist.barrier()
 
         if model_name == "Mistral-7B-Instruct-v0.3":
-            tokenizer_path = f"{mistral_models_path}/tokenizer.model.v3"
             tokenizer = MistralTokenizer.from_file(tokenizer_path)
             model = Transformer.from_folder(
                 folder=mistral_models_path,
                 max_batch_size=max_batch_size,
                 num_pipeline_ranks=WORLD_SIZE,
                 device=gpu,
+                dtype=dtype,
             )
 
-        elif model_name == "Mistral-8x7B-Instruct-v0.1":
+        elif model_name == "Mixtral-8x7B-Instruct-v0.1":
             tokenizer = MistralTokenizer.v1()
-            # tokenizer_path = f"{mistral_models_path}/tokenizer.model"
-            # tokenizer = MistralTokenizer.from_file(tokenizer_path)
-            # model = Transformer.load(
-            #     f"{mistral_models_path}/experts.pt", NODE_RANK, gpu, group
-            # )
             model = Transformer.from_folder(
                 folder=mistral_models_path,
                 max_batch_size=max_batch_size,
                 num_pipeline_ranks=WORLD_SIZE,
                 device=gpu,
+                dtype=dtype,
             )
 
     else:
@@ -79,7 +76,7 @@ def getModelandTokenizeer(
             tokenizer = MistralTokenizer.from_file(tokenizer_path)
 
         model = Transformer.from_folder(
-            mistral_models_path, max_batch_size=max_batch_size
+            mistral_models_path, max_batch_size=max_batch_size, device=gpu, dtype=dtype
         )
 
     return model, tokenizer
@@ -96,13 +93,14 @@ def run_default(
     eval_nItrs: int,
     warmup_iters: int,
     batch_size: int,
+    dtype: torch.dtype,
 ):
 
-    model, tokenizer = getModelandTokenizeer(model_name, model_path, batch_size)
     device = torch.device("cuda")
-    model.to(device)
+    model, tokenizer = getModelandTokenizeer(
+        model_name, model_path, batch_size, device, dtype
+    )
     model.eval()
-
     # if args.torch_compile:
     #     model = torch.compile(model, mode="reduce-overhead")
 
@@ -214,16 +212,17 @@ def run_dist(
     warmup_iters: int,
     benchmark: str,
     batch_size: int,
+    dtype: torch.dtype,
 ):
+
     gpu = torch.device(f"cuda:{LOCAL_RANK}")
-    torch.cuda.set_device(gpu)
     dist.init_process_group(
         "nccl", rank=WORLD_RANK, world_size=WORLD_SIZE, device_id=gpu
     )
-    group = dist.new_group(list(range(WORLD_SIZE)), use_local_synchronization=True)
-    prompts = load_data(benchmark, "../dataset", True, LOCAL_RANK, group)
+
+    prompts = load_data(benchmark, "../dataset", True, LOCAL_RANK)
     model, tokenizer = getModelandTokenizeer(
-        model_name, model_path, batch_size, True, NODE_RANK, gpu, group
+        model_name, model_path, batch_size, gpu, dtype, True, NODE_RANK
     )
     model.eval()
 
@@ -258,7 +257,7 @@ def run_dist(
                     print(f"{prompts[prompt_id]} {result}")
                     print("-" * 100)
 
-        dist.barrier(group=group)
+        dist.barrier()
 
     elif mode == "measure":
         prompt = "[INST]" + prompts[0] + "[/INST]" + "\n\nASSISTANT:"
@@ -306,7 +305,7 @@ def run_dist(
                 )
                 print("-" * 100)
 
-            dist.barrier(group=group)
+            dist.barrier()
 
     elif mode == "nsys_profile":
         completion_request = ChatCompletionRequest(
@@ -332,7 +331,7 @@ def run_dist(
                     eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
                 )
 
-        dist.barrier(group=group)
+        dist.barrier()
         out_tokens, _ = profile_generate(
             [tokens],
             model,
@@ -343,7 +342,9 @@ def run_dist(
             local_rank=LOCAL_RANK,
             local_work_size=LOCAL_WORLD_SIZE,
         )
-        dist.barrier(group=group)
+        dist.barrier()
+
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
@@ -353,12 +354,12 @@ if __name__ == "__main__":
         "--model",
         type=str,
         required=True,
-        choices=["Mistral-7B-Instruct-v0.3", "Mistral-8x7B-Instruct-v0.1"],
+        choices=["Mistral-7B-Instruct-v0.3", "Mixtral-8x7B-Instruct-v0.1"],
     )
     parser.add_argument(
         "--model_path",
         type=str,
-        default="mistral_weights/Mistral-7B-Instruct-v0.3",
+        default="weights/Mistral-7B-Instruct-v0.3",
     )
     parser.add_argument("--max_tokens", type=int, default=128)
     parser.add_argument("--T", type=float, default=0.6, help="temperature")
@@ -376,10 +377,11 @@ if __name__ == "__main__":
         choices=["mt_bench", "vicuna_bench"],
     )
     parser.add_argument("--eval_nItrs", type=int, default=0)
-    parser.add_argument("--warmup_iters", type=int, default=3)
+    parser.add_argument("--warmup_iters", type=int, default=1)
     parser.add_argument("--node-id", type=int)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--node_rank", type=int, default=0)
+    parser.add_argument("--dtype", type=torch.dtype, default=torch.float16)
     # parser.add_argument("--torch_compile", type=eval, default=False)
     args = parser.parse_args()
 
@@ -391,9 +393,7 @@ if __name__ == "__main__":
         WORLD_SIZE = int(os.environ["WORLD_SIZE"])
         WORLD_RANK = int(os.environ["RANK"])
         NODE_RANK = args.node_rank
-        os.environ["CUDA_VISIBLE_DEVICES"] = (
-            f"{LOCAL_RANK}"  # Set visible GPUs to 0 and 2
-        )
+
         run_dist(
             args.model,
             args.model_path,
@@ -405,9 +405,9 @@ if __name__ == "__main__":
             args.warmup_iters,
             args.benchmark,
             args.batch_size,
+            args.dtype,
         )
 
-        dist.destroy_process_group()
     else:
         prompts = load_data(args.benchmark)
         run_default(
@@ -421,4 +421,5 @@ if __name__ == "__main__":
             args.eval_nItrs,
             args.warmup_iters,
             args.batch_size,
+            args.dtype,
         )

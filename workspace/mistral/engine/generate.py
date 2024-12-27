@@ -80,7 +80,7 @@ def measure_generate(
 
     assert last_token_prelogits is not None
 
-    torch.cuda.synchronize()
+    torch.cuda.synchronize(model.device)
     TPOTs.append((time.time() - t) * 1000)
 
     for _ in range(max_tokens):
@@ -102,7 +102,7 @@ def measure_generate(
 
         last_token_prelogits = model.forward(next_token, seqlens=[1] * B, cache=cache)
 
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(model.device)
         TPOTs.append((time.time() - t) * 1000)
 
         assert last_token_prelogits.shape == (B, V)
