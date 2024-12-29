@@ -94,6 +94,7 @@ def run_default(
     warmup_iters: int,
     batch_size: int,
     dtype: torch.dtype,
+    torch_compile: bool,
 ):
 
     device = torch.device("cuda")
@@ -101,8 +102,8 @@ def run_default(
         model_name, model_path, batch_size, device, dtype
     )
     model.eval()
-    # if args.torch_compile:
-    #     model = torch.compile(model, mode="reduce-overhead")
+    if torch_compile:
+        model = torch.compile(model, mode="reduce-overhead")
 
     eval_nItrs = (
         min(len(prompts) // batch_size, eval_nItrs) if eval_nItrs else len(prompts)
@@ -284,6 +285,7 @@ def run_dist(
                     temperature=args.T,
                     eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
                 )
+        dist.barrier()
 
         inputs = [tokens for _ in range(batch_size)]
         n_prefill_token = len(sum(inputs, []))
@@ -330,8 +332,8 @@ def run_dist(
                     temperature=args.T,
                     eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
                 )
-
         dist.barrier()
+
         out_tokens, _ = profile_generate(
             [tokens],
             model,
@@ -353,7 +355,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        required=True,
+        # required=True,
+        default="Mistral-7B-Instruct-v0.3",
         choices=["Mistral-7B-Instruct-v0.3", "Mixtral-8x7B-Instruct-v0.1"],
     )
     parser.add_argument(
@@ -382,7 +385,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--node_rank", type=int, default=0)
     parser.add_argument("--dtype", type=torch.dtype, default=torch.float16)
-    # parser.add_argument("--torch_compile", type=eval, default=False)
+    parser.add_argument("--torch_compile", type=eval, default=False)
     args = parser.parse_args()
 
     setup_seed(args.seed)
@@ -422,4 +425,5 @@ if __name__ == "__main__":
             args.warmup_iters,
             args.batch_size,
             args.dtype,
+            args.torch_compile,
         )

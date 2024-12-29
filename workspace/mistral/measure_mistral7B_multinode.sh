@@ -22,6 +22,7 @@ if [ -e "$output_folder/$output_file" ]; then
 fi
 
 export OMP_NUM_THREADS=4
+export CUDA_LAUNCH_BLOCKING=1
 
 torchrun --nnodes=$nnodes --nproc-per-node=$nproc --node-rank=$node_rank --master-addr=$master_addr --master-port=$master_port --max-restarts 3 \
   run_mistral.py --node_rank $node_rank --model "Mistral-7B-Instruct-v0.3" --model_path "weights/Mistral-7B-Instruct-v0.3" --eval_nItrs $eval_nItrs --batch_size $batch_size \

@@ -1,15 +1,10 @@
-from typing import List, Optional, Tuple
-
 import numpy as np
 import torch
 import time
-
-# from mistral_inference.cache import BufferCache
-
 from engine.cache import BufferCache
 from mistral_inference.mamba import Mamba
 from mistral_inference.transformer import Transformer
-from util import timed
+from typing import List, Optional, Tuple
 
 
 @torch.inference_mode()
@@ -285,23 +280,23 @@ def generate_mamba(
 def generate(
     encoded_prompts: List[List[int]],
     model: Transformer,
-    images: List[List[np.ndarray]] = [],
+    # images: List[List[np.ndarray]] = [],
     *,
     max_tokens: int,
     temperature: float,
     chunk_size: Optional[int] = None,
     eos_id: Optional[int] = None,
 ) -> Tuple[List[List[int]], List[List[float]]]:
-    images_torch: List[List[torch.Tensor]] = []
-    if images:
-        assert chunk_size is None
-        images_torch = [
-            [
-                torch.tensor(im, device=model.device, dtype=model.dtype)
-                for im in images_for_sample
-            ]
-            for images_for_sample in images
-        ]
+    # images_torch: List[List[torch.Tensor]] = []
+    # if images:
+    #     assert chunk_size is None
+    #     images_torch = [
+    #         [
+    #             torch.tensor(im, device=model.device, dtype=model.dtype)
+    #             for im in images_for_sample
+    #         ]
+    #         for images_for_sample in images
+    #     ]
 
     model = model.eval()
     B, V = len(encoded_prompts), model.args.vocab_size
@@ -330,7 +325,7 @@ def generate(
     if chunk_size is None:
         chunk_size = max_prompt_len
 
-    flattened_images: List[torch.Tensor] = sum(images_torch, [])
+    # flattened_images: List[torch.Tensor] = sum(images_torch, [])
 
     # Encode prompt by chunks
     for s in range(0, max_prompt_len, chunk_size):
@@ -338,7 +333,7 @@ def generate(
         assert all(len(p) > 0 for p in prompt_chunks)
         prelogits = model.forward(
             torch.tensor(sum(prompt_chunks, []), device=model.device, dtype=torch.long),
-            images=flattened_images,
+            # images=flattened_images,
             seqlens=[len(p) for p in prompt_chunks],
             cache=cache,
         )
