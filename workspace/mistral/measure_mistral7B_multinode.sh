@@ -1,10 +1,9 @@
 #!/bin/bash
 
-if [ $# -ne 7 ]; then
-  echo "Usage: $0 <nnodes> <nproc> <node_rank> <master_addr> <master_port> <eval_nItrs> <batch_size>"
+if [ $# -ne 6 ]; then
+  echo "Usage: $0 <nnodes> <nproc> <node_rank> <master_addr> <master_port> <eval_nItrs>"
   exit 1
 fi
-
 
 nnodes=$1
 nproc=$2
@@ -12,7 +11,6 @@ node_rank=$3
 master_addr=$4
 master_port=$5
 eval_nItrs=$6
-batch_size=$7
 output_folder="result"
 output_file="measure_mistral7B_multinode.txt"
 
@@ -22,8 +20,10 @@ if [ -e "$output_folder/$output_file" ]; then
 fi
 
 export OMP_NUM_THREADS=4
-export CUDA_LAUNCH_BLOCKING=1
 
-torchrun --nnodes=$nnodes --nproc-per-node=$nproc --node-rank=$node_rank --master-addr=$master_addr --master-port=$master_port --max-restarts 3 \
-  run_mistral.py --node_rank $node_rank --model "Mistral-7B-Instruct-v0.3" --model_path "weights/Mistral-7B-Instruct-v0.3" --eval_nItrs $eval_nItrs --batch_size $batch_size \
-  >> $output_folder/$output_file
+for N in 1 2 4 8 16 32 64
+do
+  torchrun --nnodes=$nnodes --nproc-per-node=$nproc --node-rank=$node_rank --master-addr=$master_addr --master-port=$master_port --max-restarts 3 \
+    run_mistral.py --node_rank $node_rank --model "Mistral-7B-Instruct-v0.3" --model_path "weights/Mistral-7B-Instruct-v0.3" --eval_nItrs $eval_nItrs --batch_size $N \
+    >> $output_folder/$output_file
+done

@@ -32,10 +32,10 @@ def setup_seed(seed):
 
 
 def load_data(
-    benchmark, folder="../dataset", distributed=False, local_rank=None, group=None
+    prompt_path, distributed=False, local_rank=None, group=None, folder="../prompts"
 ):
 
-    def download_url(url: str, folder="folder"):
+    def download_url(url: str, folder: str):
         """
         Downloads the content of an url to a folder. Modified from \
         https://github.com/pyg-team/pytorch_geometric/tree/master/torch_geometric
@@ -65,24 +65,28 @@ def load_data(
 
         return
 
-    if benchmark == "mt_bench" or benchmark == "vicuna_bench":
-        if not os.path.exists(f"{folder}/{benchmark}/question.jsonl") and (
-            not distributed or local_rank == 0
-        ):
-            download_url(
-                f"https://raw.githubusercontent.com/lm-sys/FastChat/main/fastchat/llm_judge/data/{benchmark}/question.jsonl",
-                f"{folder}/{benchmark}",
-            )
+    prompts = []
+    if not os.path.exists(prompt_path):
+        benchmark = prompt_path.split("/")[-1].split(".")[0]
+        if benchmark == "mt_bench" or benchmark == "vicuna_bench":
+            if not os.path.exists(f"{folder}/{benchmark}/question.jsonl") and (
+                not distributed or local_rank == 0
+            ):
+                download_url(
+                    f"https://raw.githubusercontent.com/lm-sys/FastChat/main/fastchat/llm_judge/data/{benchmark}/question.jsonl",
+                    f"{folder}/{benchmark}",
+                )
 
-        if distributed:
-            dist.barrier(group)
+            if distributed:
+                dist.barrier(group)
 
-        prompts = []
-        with open(f"{folder}/{benchmark}/question.jsonl", "r") as file:
-            for line in file:
-                prompts.append(json.loads(line)["turns"][0])
+            with open(f"{folder}/{benchmark}/question.jsonl", "r") as file:
+                for line in file:
+                    prompts.append(json.loads(line)["turns"][0])
+        else:
+            raise ValueError("Unsupporeted Benchmark")
     else:
-        raise ValueError("Unsupporeted Benchmark")
+        prompts = json.load(open(prompt_path))["prompts"]
 
     return prompts
 

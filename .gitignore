@@ -2,7 +2,7 @@ __pycache__/
 ntu_paslab_llm
 *Sequoia
 *.nys-rep
-workspace/dataset
+workspace/prompts/*_bench
 *weights
 *.nsys-rep
 result

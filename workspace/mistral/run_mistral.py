@@ -133,7 +133,8 @@ def run_default(
                 inputs,
                 model,
                 max_tokens=max_tokens,
-                temperature=args.T,
+                temperature=T,
+                top_p=P,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
 
@@ -155,7 +156,8 @@ def run_default(
                 [tokens],
                 model,
                 max_tokens=max_tokens,
-                temperature=args.T,
+                temperature=T,
+                top_p=P,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
 
@@ -163,7 +165,8 @@ def run_default(
             [tokens],
             model,
             max_tokens=2,
-            temperature=args.T,
+            temperature=T,
+            top_p=P,
             eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
         )
 
@@ -178,7 +181,8 @@ def run_default(
                 [tokens],
                 model,
                 max_tokens=max_tokens,
-                temperature=args.T,
+                temperature=T,
+                top_p=P,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
 
@@ -190,7 +194,8 @@ def run_default(
                 inputs,
                 model,
                 max_tokens=max_tokens,
-                temperature=args.T,
+                temperature=T,
+                top_p=P,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
             n_decode_token = len(sum(out_tokens, []))
@@ -200,6 +205,36 @@ def run_default(
                 f"TTFT: {TPOTs[0]:.2f}ms, TPOT: {sum(TPOTs[1:]) / len(TPOTs[1:]):.2f} ms, Prefill throughput: {n_prefill_token/(TPOTs[0]/1000):.2f} tokens/s, Decode throughtput: {n_decode_token/(sum(TPOTs[1:])/ 1000):.2f} tokens/s"
             )
             print("-" * 100)
+
+    elif mode == "profile":
+        completion_request = ChatCompletionRequest(
+            messages=[UserMessage(content=prompts[0])]
+        )
+        tokens = tokenizer.encode_chat_completion(completion_request).tokens
+        for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
+            out_tokens, _ = generate(
+                [tokens],
+                model,
+                max_tokens=max_tokens,
+                temperature=T,
+                top_p=P,
+                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            )
+
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ]
+        ) as p:
+            out_tokens, _ = profile_generate(
+                [tokens],
+                model,
+                max_tokens=2,
+                temperature=args.T,
+                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            )
+            print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
 
 
 def run_dist(
@@ -211,7 +246,7 @@ def run_dist(
     mode: str,
     eval_nItrs: int,
     warmup_iters: int,
-    benchmark: str,
+    prompt_path: str,
     batch_size: int,
     dtype: torch.dtype,
 ):
@@ -221,7 +256,7 @@ def run_dist(
         "nccl", rank=WORLD_RANK, world_size=WORLD_SIZE, device_id=gpu
     )
 
-    prompts = load_data(benchmark, "../dataset", True, LOCAL_RANK)
+    prompts = load_data(prompt_path, True, LOCAL_RANK)
     model, tokenizer = getModelandTokenizeer(
         model_name, model_path, batch_size, gpu, dtype, True, NODE_RANK
     )
@@ -245,7 +280,8 @@ def run_dist(
                 inputs,
                 model,
                 max_tokens=max_tokens,
-                temperature=args.T,
+                temperature=T,
+                top_p=P,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
 
@@ -273,7 +309,8 @@ def run_dist(
                     [tokens],
                     model,
                     max_tokens=max_tokens,
-                    temperature=args.T,
+                    temperature=T,
+                    top_p=P,
                     eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
                 )
         else:
@@ -282,7 +319,8 @@ def run_dist(
                     [tokens],
                     model,
                     max_tokens=max_tokens,
-                    temperature=args.T,
+                    temperature=T,
+                    top_p=P,
                     eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
                 )
         dist.barrier()
@@ -295,7 +333,8 @@ def run_dist(
                 inputs,
                 model,
                 max_tokens=max_tokens,
-                temperature=args.T,
+                temperature=T,
+                top_p=P,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
             n_decode_token = len(sum(out_tokens, []))
@@ -320,7 +359,8 @@ def run_dist(
                     [tokens],
                     model,
                     max_tokens=max_tokens,
-                    temperature=args.T,
+                    temperature=T,
+                    top_p=P,
                     eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
                 )
         else:
@@ -329,7 +369,8 @@ def run_dist(
                     [tokens],
                     model,
                     max_tokens=max_tokens,
-                    temperature=args.T,
+                    temperature=T,
+                    top_p=P,
                     eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
                 )
         dist.barrier()
@@ -338,7 +379,8 @@ def run_dist(
             [tokens],
             model,
             max_tokens=2,
-            temperature=args.T,
+            temperature=T,
+            top_p=P,
             eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             distributed=True,
             local_rank=LOCAL_RANK,
@@ -355,7 +397,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        # required=True,
         default="Mistral-7B-Instruct-v0.3",
         choices=["Mistral-7B-Instruct-v0.3", "Mixtral-8x7B-Instruct-v0.1"],
     )
@@ -371,15 +412,23 @@ if __name__ == "__main__":
         "--mode",
         type=str,
         default="measure",
-        choices=["genText", "printModel", "measure", "nsys_profile"],
+        choices=["genText", "printModel", "measure", "nsys_profile", "profile"],
     )
     parser.add_argument(
-        "--benchmark",
+        "--prompt_path",
         type=str,
-        default="mt_bench",
-        choices=["mt_bench", "vicuna_bench"],
+        default="../prompts/diverse_short.json",
+        choices=[
+            "../prompts/diverse_short.json",
+            "../prompts/long.json",
+            "../prompts/mid.json",
+            "../prompts/short.json",
+            "../prompts/trivial.json",
+            "../prompts/mt_bench.json",
+            "../prompts/vicuna_bench.json",
+        ],
     )
-    parser.add_argument("--eval_nItrs", type=int, default=0)
+    parser.add_argument("--eval_nItrs", type=int, default=1)
     parser.add_argument("--warmup_iters", type=int, default=1)
     parser.add_argument("--node-id", type=int)
     parser.add_argument("--batch_size", type=int, default=1)
@@ -406,13 +455,14 @@ if __name__ == "__main__":
             args.mode,
             args.eval_nItrs,
             args.warmup_iters,
-            args.benchmark,
+            args.prompt_path,
             args.batch_size,
             args.dtype,
         )
 
     else:
-        prompts = load_data(args.benchmark)
+
+        prompts = load_data(args.prompt_path)
         run_default(
             args.model,
             args.model_path,
