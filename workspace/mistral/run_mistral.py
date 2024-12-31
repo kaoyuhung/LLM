@@ -416,7 +416,11 @@ if __name__ == "__main__":
     parser.add_argument("--node-id", type=int)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--node_rank", type=int, default=0)
-    parser.add_argument("--dtype", type=torch.dtype, default=torch.float16)
+    dtype_map = {
+        "f16": torch.float16,
+        "bf16": torch.bfloat16,
+    }
+    parser.add_argument("--dtype", type=str, default="bf16", choices=dtype_map.keys())
     parser.add_argument("--torch_compile", type=eval, default=False)
     args = parser.parse_args()
 
@@ -440,7 +444,7 @@ if __name__ == "__main__":
             args.warmup_iters,
             args.prompt_path,
             args.batch_size,
-            args.dtype,
+            dtype_map[args.dtype],
         )
 
     else:
@@ -457,6 +461,6 @@ if __name__ == "__main__":
             args.eval_nItrs,
             args.warmup_iters,
             args.batch_size,
-            args.dtype,
+            dtype_map[args.dtype],
             args.torch_compile,
         )
