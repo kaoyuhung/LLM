@@ -1,15 +1,20 @@
 import numpy as np
 import torch
 import time
+import torch.distributed as dist
 from engine.cache import BufferCache
 from mistral_inference.mamba import Mamba
 from mistral_inference.transformer import Transformer
 from typing import List, Optional, Tuple
+from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
+from mistral_common.protocol.instruct.messages import UserMessage
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
 
 
 @torch.inference_mode()
 def measure_generate(
-    encoded_prompts: List[List[int]],
+    prompts: List[str],
+    tokenizer: MistralTokenizer,
     model: Transformer,
     max_tokens: int,
     temperature: float,
@@ -18,10 +23,16 @@ def measure_generate(
     distribued=False,
     local_rank=None,
 ):
-    t, TPOTs = time.time(), []
-
+    t0 = time.time()
+    encoded_prompts: List[List[int]] = [
+        tokenizer.encode_chat_completion(
+            ChatCompletionRequest(messages=[UserMessage(content=p)])
+        ).tokens
+        for p in prompts
+    ]
     B, V = len(encoded_prompts), model.args.vocab_size
     seqlens = [len(x) for x in encoded_prompts]
+    n_prefill_token = len(sum(encoded_prompts, []))
 
     # Cache
     cache_window = max(seqlens) + max_tokens
@@ -76,11 +87,13 @@ def measure_generate(
     assert last_token_prelogits is not None
 
     torch.cuda.synchronize(model.device)
-    TPOTs.append((time.time() - t) * 1000)
+    if distribued:
+        dist.barrier()
+    t1 = time.time()
 
     for _ in range(max_tokens):
         t = time.time()
-        next_token = sample(last_token_prelogits, temperature=temperature, top_p=0.8)
+        next_token = sample(last_token_prelogits, temperature=temperature, top_p=top_p)
 
         if eos_id is not None:
             is_finished = is_finished | (next_token == eos_id).cpu()
@@ -97,9 +110,6 @@ def measure_generate(
 
         last_token_prelogits = model.forward(next_token, seqlens=[1] * B, cache=cache)
 
-        torch.cuda.synchronize(model.device)
-        TPOTs.append((time.time() - t) * 1000)
-
         assert last_token_prelogits.shape == (B, V)
 
     generated_tokens: List[List[int]]
@@ -108,12 +118,24 @@ def measure_generate(
     else:
         generated_tokens = []
 
-    return generated_tokens, logprobs, TPOTs
+    torch.cuda.synchronize(model.device)
+    if distribued:
+        dist.barrier()
+    t2 = time.time()
+
+    return (
+        n_prefill_token,
+        t1 - t0,
+        generated_tokens,
+        t2 - t1,
+        logprobs,
+    )
 
 
 @torch.inference_mode()
 def profile_generate(
-    encoded_prompts: List[List[int]],
+    prompts: List[str],
+    tokenizer: MistralTokenizer,
     model: Transformer,
     max_tokens: int,
     temperature: float,
@@ -123,6 +145,13 @@ def profile_generate(
     local_rank=None,
     local_work_size=None,
 ):
+
+    encoded_prompts: List[List[int]] = [
+        tokenizer.encode_chat_completion(
+            ChatCompletionRequest(messages=[UserMessage(content=p)])
+        ).tokens
+        for p in prompts
+    ]
 
     B, V = len(encoded_prompts), model.args.vocab_size
     seqlens = [len(x) for x in encoded_prompts]
@@ -196,7 +225,7 @@ def profile_generate(
         if not distributed or local_rank == 0:
             torch.cuda.nvtx.range_push("sample next token")
 
-        next_token = sample(last_token_prelogits, temperature=temperature, top_p=0.8)
+        next_token = sample(last_token_prelogits, temperature=temperature, top_p=top_p)
 
         if not distributed or local_rank == 0:
             torch.cuda.nvtx.range_pop()
@@ -278,7 +307,8 @@ def generate_mamba(
 
 @torch.inference_mode()
 def generate(
-    encoded_prompts: List[List[int]],
+    prompts: List[str],
+    tokenizer: MistralTokenizer,
     model: Transformer,
     # images: List[List[np.ndarray]] = [],
     *,
@@ -298,6 +328,13 @@ def generate(
     #         ]
     #         for images_for_sample in images
     #     ]
+
+    encoded_prompts: List[List[int]] = [
+        tokenizer.encode_chat_completion(
+            ChatCompletionRequest(messages=[UserMessage(content=p)])
+        ).tokens
+        for p in prompts
+    ]
 
     model = model.eval()
     B, V = len(encoded_prompts), model.args.vocab_size
@@ -373,7 +410,7 @@ def generate(
 
     assert last_token_prelogits is not None
     for _ in range(max_tokens):
-        next_token = sample(last_token_prelogits, temperature=temperature, top_p=0.8)
+        next_token = sample(last_token_prelogits, temperature=temperature, top_p=top_p)
 
         if eos_id is not None:
             is_finished = is_finished | (next_token == eos_id).cpu()
