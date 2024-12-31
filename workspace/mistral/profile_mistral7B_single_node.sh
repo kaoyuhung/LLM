@@ -17,5 +17,5 @@ fi
 
 export OMP_NUM_THREADS=4
 
-nsys profile --trace-fork-before-exec=true --cudabacktrace=true --capture-range=cudaProfilerApi --capture-range-end=stop-shutdown --cuda-memory-usage=true --sample=none -f true -o $output_folder/$output_file \
+nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop --cuda-memory-usage=true --sample=none -f true -o $output_folder/$output_file \
     torchrun --standalone --nnodes=1 --nproc-per-node=$nproc run_mistral.py --mode nsys_profile --model "Mistral-7B-Instruct-v0.3" --model_path "weights/Mistral-7B-Instruct-v0.3" --eval_nItrs 1

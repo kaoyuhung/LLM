@@ -199,32 +199,48 @@ def run_default(
             print("-" * 100)
 
     elif mode == "profile":
-        for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
-            out_tokens, _ = generate(
-                [prompts[0]],
-                tokenizer,
-                model,
-                max_tokens=max_tokens,
-                temperature=T,
-                top_p=P,
-                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-            )
+        # for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
+        #     out_tokens, _ = generate(
+        #         [prompts[0]],
+        #         tokenizer,
+        #         model,
+        #         max_tokens=max_tokens,
+        #         temperature=T,
+        #         top_p=P,
+        #         eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+        #     )
+
+        # def trace_handler(prof):
+        # print(
+        #     prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1)
+        # )
+        # prof.export_chrome_trace("./result/trace.json")
+
+        from torch.profiler import tensorboard_trace_handler
+
+        trace_handler = tensorboard_trace_handler(dir_name="./result_profile")
 
         with torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
                 torch.profiler.ProfilerActivity.CUDA,
-            ]
+            ],
+            schedule=torch.profiler.schedule(wait=0, warmup=warmup_iters, active=2),
+            on_trace_ready=trace_handler,
         ) as p:
-            out_tokens, _ = profile_generate(
-                [prompts[0]],
-                tokenizer,
-                model,
-                max_tokens=2,
-                temperature=args.T,
-                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-            )
-            print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
+            for _ in tqdm(range(6), desc="Profiling..."):
+                out_tokens, _ = generate(
+                    [prompts[0]],
+                    tokenizer,
+                    model,
+                    max_tokens=max_tokens,
+                    temperature=T,
+                    top_p=P,
+                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                )
+                p.step()
+
+            # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
 
 
 def run_dist(
@@ -370,6 +386,45 @@ def run_dist(
             local_work_size=LOCAL_WORLD_SIZE,
         )
         dist.barrier()
+
+    elif mode == "profile":
+
+        from torch.profiler import tensorboard_trace_handler
+
+        trace_handler = tensorboard_trace_handler(dir_name="./result_profile")
+
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(wait=0, warmup=warmup_iters, active=2),
+            on_trace_ready=trace_handler,
+        ) as p:
+            if LOCAL_RANK == 0:
+                for _ in tqdm(range(6), desc="Profiling..."):
+                    out_tokens, _ = generate(
+                        [prompts[0]],
+                        tokenizer,
+                        model,
+                        max_tokens=max_tokens,
+                        temperature=T,
+                        top_p=P,
+                        eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                    )
+                    p.step()
+            else:
+                for _ in range(6):
+                    out_tokens, _ = generate(
+                        [prompts[0]],
+                        tokenizer,
+                        model,
+                        max_tokens=max_tokens,
+                        temperature=T,
+                        top_p=P,
+                        eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                    )
+                    p.step()
 
     dist.destroy_process_group()
 

@@ -188,13 +188,13 @@ def profile_generate(
     if not distributed or local_rank == 0:
         torch.cuda.nvtx.range_pop()
 
-    if not distributed or local_rank == 0:
-        torch.cuda.nvtx.range_push("log_softmax")
+    # if not distributed or local_rank == 0:
+    #     torch.cuda.nvtx.range_push("log_softmax")
 
     logits = torch.log_softmax(prelogits, dim=-1)
 
-    if not distributed or local_rank == 0:
-        torch.cuda.nvtx.range_pop()
+    # if not distributed or local_rank == 0:
+    #     torch.cuda.nvtx.range_pop()
 
     offset = 0
     for i_seq, sequence in enumerate(encoded_prompts):
@@ -222,13 +222,13 @@ def profile_generate(
     assert last_token_prelogits is not None
     for _ in range(max_tokens):
 
-        if not distributed or local_rank == 0:
-            torch.cuda.nvtx.range_push("sample next token")
+        # if not distributed or local_rank == 0:
+        #     torch.cuda.nvtx.range_push("sample next token")
 
         next_token = sample(last_token_prelogits, temperature=temperature, top_p=top_p)
 
-        if not distributed or local_rank == 0:
-            torch.cuda.nvtx.range_pop()
+        # if not distributed or local_rank == 0:
+        #     torch.cuda.nvtx.range_pop()
 
         if eos_id is not None:
             is_finished = is_finished | (next_token == eos_id).cpu()
@@ -236,28 +236,28 @@ def profile_generate(
         if is_finished.all():
             break
 
-        if not distributed or local_rank == 0:
-            torch.cuda.nvtx.range_push("log_softmax")
+        # if not distributed or local_rank == 0:
+        #     torch.cuda.nvtx.range_push("log_softmax")
 
         last_token_logits = torch.log_softmax(last_token_prelogits, dim=-1)
 
-        if not distributed or local_rank == 0:
-            torch.cuda.nvtx.range_pop()
+        # if not distributed or local_rank == 0:
+        #     torch.cuda.nvtx.range_pop()
 
         for i in range(B):
             logprobs[i].append(last_token_logits[i, next_token[i]].item())
 
         generated_tensors.append(next_token[:, None])
 
-        if not distributed or local_rank == 0:
-            torch.cuda.nvtx.range_push("decode forward")
+        # if not distributed or local_rank == 0:
+        #     torch.cuda.nvtx.range_push("decode forward")
 
         last_token_prelogits = model.forward_profile(
             next_token, seqlens=[1] * B, cache=cache
         )
 
-        if not distributed or local_rank == 0:
-            torch.cuda.nvtx.range_pop()
+        # if not distributed or local_rank == 0:
+        #     torch.cuda.nvtx.range_pop()
 
         assert last_token_prelogits.shape == (B, V)
 
