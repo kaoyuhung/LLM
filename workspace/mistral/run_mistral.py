@@ -6,6 +6,7 @@ import argparse
 import torch
 import torch.distributed as dist
 from pathlib import Path
+from typing import Optional
 from engine.transformer import Transformer
 from engine.generate import generate, profile_generate, measure_generate
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
@@ -24,8 +25,7 @@ def getModelandTokenizeer(
     gpu,
     dtype,
     distributed=False,
-    node_rank=None,
-    group=None,
+    model_version=None,
 ):
 
     mistral_models_path = Path(mistral_models_path)
@@ -55,20 +55,49 @@ def getModelandTokenizeer(
             model = Transformer.from_folder(
                 folder=mistral_models_path,
                 max_batch_size=max_batch_size,
-                num_pipeline_ranks=WORLD_SIZE,
+                num_ranks=WORLD_SIZE,
                 device=gpu,
                 dtype=dtype,
             )
 
         elif model_name == "Mixtral-8x7B-Instruct-v0.1":
             tokenizer = MistralTokenizer.v1()
-            model = Transformer.from_folder(
-                folder=mistral_models_path,
-                max_batch_size=max_batch_size,
-                num_pipeline_ranks=WORLD_SIZE,
-                device=gpu,
-                dtype=dtype,
-            )
+
+            if not model_version:
+                model = Transformer.from_folder(
+                    folder=mistral_models_path,
+                    max_batch_size=max_batch_size,
+                    num_ranks=WORLD_SIZE,
+                    device=gpu,
+                    dtype=dtype,
+                )
+            else:
+                global_group = dist.new_group(
+                    list(range(WORLD_SIZE)), use_local_synchronization=True
+                )
+                if model_version == "v1":
+                    from engine.mixtral_8x7b_v1 import TransformerV1
+
+                    model = TransformerV1.load(
+                        Path(mistral_models_path),
+                        NODE_RANK,
+                        gpu,
+                        global_group,
+                        max_batch_size,
+                    )
+
+                elif model_version == "v2":
+                    from engine.mixtral_8x7b_v2 import TransformerV2, get_node_group
+
+                    node_group = get_node_group(NODE_RANK, gpu, global_group)
+                    model = TransformerV2.load(
+                        Path(mistral_models_path),
+                        NODE_RANK,
+                        gpu,
+                        node_group,
+                        global_group,
+                        max_batch_size,
+                    )
 
     else:
         if model_name == "Mistral-7B-Instruct-v0.3":
@@ -107,6 +136,7 @@ def run_default(
         model_name, model_path, batch_size, device, dtype
     )
     model.eval()
+
     if torch_compile:
         model = torch.compile(model, mode="reduce-overhead")
 
@@ -194,28 +224,11 @@ def run_default(
             n_decode_token = len(sum(out_tokens, []))
             print(f"evalItr{i} (batch_size={batch_size})")
             print(
-                f"Prefill time: {prefill_time:.2f}ms, Decode time: {(decode_time):.2f} ms, Prefill throughput: {n_prefill_token/prefill_time:.2f} tokens/s, Decode throughtput: {(n_decode_token/decode_time):.2f} tokens/s"
+                f"Prefill time: {prefill_time:.2f} ms, Decode time: {(decode_time):.2f} ms, Prefill throughput: {n_prefill_token/prefill_time:.2f} tokens/s, Decode throughtput: {(n_decode_token/decode_time):.2f} tokens/s"
             )
             print("-" * 100)
 
     elif mode == "profile":
-        # for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
-        #     out_tokens, _ = generate(
-        #         [prompts[0]],
-        #         tokenizer,
-        #         model,
-        #         max_tokens=max_tokens,
-        #         temperature=T,
-        #         top_p=P,
-        #         eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-        #     )
-
-        # def trace_handler(prof):
-        # print(
-        #     prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1)
-        # )
-        # prof.export_chrome_trace("./result/trace.json")
-
         from torch.profiler import tensorboard_trace_handler
 
         trace_handler = tensorboard_trace_handler(dir_name="./result_profile")
@@ -255,6 +268,7 @@ def run_dist(
     prompt_path: str,
     batch_size: int,
     dtype: torch.dtype,
+    model_version: Optional[str],
 ):
 
     gpu = torch.device(f"cuda:{LOCAL_RANK}")
@@ -267,11 +281,20 @@ def run_dist(
         len(prompts) // batch_size + ((len(prompts) % batch_size) > 0), eval_nItrs
     )
     model, tokenizer = getModelandTokenizeer(
-        model_name, model_path, batch_size, gpu, dtype, True, NODE_RANK
+        model_name, model_path, batch_size, gpu, dtype, True, model_version
     )
     model.eval()
 
-    if mode == "genText":
+    if mode == "printModel":
+        for current_rank in range(WORLD_SIZE):
+            if WORLD_RANK == current_rank:
+                summary(
+                    model,
+                    depth=6,
+                )
+            dist.barrier()
+
+    elif mode == "genText":
         for i in range(eval_nItrs):
             out_tokens, _ = generate(
                 prompts[
@@ -388,7 +411,6 @@ def run_dist(
         dist.barrier()
 
     elif mode == "profile":
-
         from torch.profiler import tensorboard_trace_handler
 
         trace_handler = tensorboard_trace_handler(dir_name="./result_profile")
@@ -477,6 +499,7 @@ if __name__ == "__main__":
     }
     parser.add_argument("--dtype", type=str, default="bf16", choices=dtype_map.keys())
     parser.add_argument("--torch_compile", type=eval, default=False)
+    parser.add_argument("--model_version", type=str, choices=["v0", "v1", "v2", "v3"])
     args = parser.parse_args()
 
     setup_seed(args.seed)
@@ -500,10 +523,10 @@ if __name__ == "__main__":
             args.prompt_path,
             args.batch_size,
             dtype_map[args.dtype],
+            args.model_version,
         )
 
     else:
-
         prompts = load_data(args.prompt_path)
         run_default(
             args.model,

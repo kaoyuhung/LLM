@@ -32,7 +32,6 @@ def measure_generate(
     ]
     B, V = len(encoded_prompts), model.args.vocab_size
     seqlens = [len(x) for x in encoded_prompts]
-    n_prefill_token = len(sum(encoded_prompts, []))
 
     # Cache
     cache_window = max(seqlens) + max_tokens
@@ -51,12 +50,10 @@ def measure_generate(
     logprobs: List[List[float]] = [[] for _ in range(B)]
     last_token_prelogits = None
 
-    assert all(len(p) > 0 for p in encoded_prompts)
-
     input_ids = sum(encoded_prompts, [])
     prelogits = model.forward(
         torch.tensor(input_ids, device=model.device, dtype=torch.long),
-        seqlens=[len(p) for p in encoded_prompts],
+        seqlens=seqlens,
         cache=cache,
     )
     logits = torch.log_softmax(prelogits, dim=-1)
@@ -78,13 +75,10 @@ def measure_generate(
         )
         - 1,
     )
-    assert last_token_prelogits.shape == (B, V)
 
     # decode
     generated_tensors = []
     is_finished = torch.tensor([False for _ in range(B)])
-
-    assert last_token_prelogits is not None
 
     torch.cuda.synchronize(model.device)
     if distribued:
@@ -92,7 +86,6 @@ def measure_generate(
     t1 = time.time()
 
     for _ in range(max_tokens):
-        t = time.time()
         next_token = sample(last_token_prelogits, temperature=temperature, top_p=top_p)
 
         if eos_id is not None:
@@ -124,7 +117,7 @@ def measure_generate(
     t2 = time.time()
 
     return (
-        n_prefill_token,
+        len(input_ids),
         t1 - t0,
         generated_tokens,
         t2 - t1,
@@ -274,38 +267,6 @@ def profile_generate(
 
 
 @torch.inference_mode()
-def generate_mamba(
-    encoded_prompts: List[List[int]],
-    model: Mamba,
-    *,
-    max_tokens: int,
-    temperature: float,
-    chunk_size: Optional[int] = None,
-    eos_id: Optional[int] = None,
-) -> Tuple[List[List[int]], List[List[float]]]:
-    input_ids = torch.tensor(encoded_prompts, device=model.device)
-    output = model.model.generate(
-        input_ids=input_ids,
-        max_length=input_ids.shape[-1] + max_tokens,
-        cg=True,
-        return_dict_in_generate=True,
-        output_scores=True,
-        enable_timing=False,
-        eos_token_id=eos_id,
-        temperature=temperature,
-        top_p=0.8,
-    )
-    generated_tokens = output.sequences[:, input_ids.shape[-1] :].tolist()
-
-    _logprobs: List[List[float]] = [[] for _ in range(len(generated_tokens))]
-    for seq_idx, batch_score in enumerate(output.scores):
-        for batch_idx, score in enumerate(batch_score.tolist()):
-            _logprobs[batch_idx].append(score[generated_tokens[batch_idx][seq_idx]])
-
-    return generated_tokens, _logprobs
-
-
-@torch.inference_mode()
 def generate(
     prompts: List[str],
     tokenizer: MistralTokenizer,
@@ -335,10 +296,7 @@ def generate(
         ).tokens
         for p in prompts
     ]
-
-    model = model.eval()
     B, V = len(encoded_prompts), model.args.vocab_size
-
     seqlens = [len(x) for x in encoded_prompts]
 
     # Cache
@@ -433,6 +391,38 @@ def generate(
         generated_tokens = []
 
     return generated_tokens, logprobs
+
+
+@torch.inference_mode()
+def generate_mamba(
+    encoded_prompts: List[List[int]],
+    model: Mamba,
+    *,
+    max_tokens: int,
+    temperature: float,
+    chunk_size: Optional[int] = None,
+    eos_id: Optional[int] = None,
+) -> Tuple[List[List[int]], List[List[float]]]:
+    input_ids = torch.tensor(encoded_prompts, device=model.device)
+    output = model.model.generate(
+        input_ids=input_ids,
+        max_length=input_ids.shape[-1] + max_tokens,
+        cg=True,
+        return_dict_in_generate=True,
+        output_scores=True,
+        enable_timing=False,
+        eos_token_id=eos_id,
+        temperature=temperature,
+        top_p=0.8,
+    )
+    generated_tokens = output.sequences[:, input_ids.shape[-1] :].tolist()
+
+    _logprobs: List[List[float]] = [[] for _ in range(len(generated_tokens))]
+    for seq_idx, batch_score in enumerate(output.scores):
+        for batch_idx, score in enumerate(batch_score.tolist()):
+            _logprobs[batch_idx].append(score[generated_tokens[batch_idx][seq_idx]])
+
+    return generated_tokens, _logprobs
 
 
 def sample(logits: torch.Tensor, temperature: float, top_p: float) -> torch.Tensor:

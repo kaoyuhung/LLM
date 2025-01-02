@@ -95,7 +95,6 @@ class CacheView:
         n_kv_heads, head_dim = self.cache_k.shape[-2:]
         flat_cache_k = self.cache_k.view(-1, n_kv_heads, head_dim)
         flat_cache_v = self.cache_v.view(-1, n_kv_heads, head_dim)
-
         flat_cache_k.index_copy_(
             0, self.metadata.cache_positions, xk[self.metadata.to_cache_mask]
         )
@@ -175,7 +174,7 @@ class BufferCache:
 
         self.cache_sizes: List[int] = get_cache_sizes(
             n_layers, max_seq_len, sliding_window
-        )
+        )  # n_layers * [max_seq_len] (max_seq_len = max_new_tokens + prefill_len) if sliding window is none
         assert (
             len(self.cache_sizes) == n_layers
         ), f"Expected {n_layers} cache sizes, got {len(self.cache_sizes)}"
@@ -261,7 +260,7 @@ class BufferCache:
         )
         cached_elements = torch.tensor(
             [sum(mask) for mask in masks], device=self.device, dtype=torch.long
-        )
+        )  # (batchsz, )
         positions = torch.cat(
             [torch.arange(pos, pos + seqlen) for pos, seqlen in zip(seqpos, seqlens)]
         ).to(device=self.device, dtype=torch.long)
@@ -269,14 +268,14 @@ class BufferCache:
             sum([[i] * seqlen for i, seqlen in enumerate(seqlens)], []),
             device=self.device,
             dtype=torch.long,
-        )
+        )  # [0,0,0....,0,1,1,1.....,2,2,2,...]
         cache_positions = positions % cache_size + batch_idx * cache_size
         first_prefill = seqpos[0] == 0
         subsequent_prefill = any(seqlen > 1 for seqlen in seqlens)
         if first_prefill:
             assert all([pos == 0 for pos in seqpos]), seqpos
             mask = BlockDiagonalCausalMask.from_seqlens(
-                seqlens, device=self.device
+                q_seqlen=seqlens, device=self.device
             ).make_local_attention(cache_size)
         elif subsequent_prefill:
             assert self.kv_seqlens is not None

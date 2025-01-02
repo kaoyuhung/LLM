@@ -6,3 +6,5 @@ workspace/prompts/*_bench
 *weights
 *.nsys-rep
 result*
+workspace/test
+examples

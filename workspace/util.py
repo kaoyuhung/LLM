@@ -3,25 +3,6 @@ import json
 import torch
 import torch.distributed as dist
 import numpy as np
-import time
-
-
-def timed(model, useCUDA, *args, **kwargs):
-    if useCUDA:
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        result = model(*args, **kwargs)
-        end.record()
-        torch.cuda.synchronize()
-        t = start.elapsed_time(end)
-    else:
-        start = time.time()
-        result = model(*args, **kwargs)
-        torch.cuda.synchronize()
-        t = (time.time() - start) * 1000
-
-    return result, t
 
 
 def setup_seed(seed):

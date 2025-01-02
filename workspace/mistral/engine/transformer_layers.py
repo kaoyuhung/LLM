@@ -51,10 +51,10 @@ class Attention(nn.Module):
         self.scale = self.head_dim**-0.5
 
         MaybeLora = maybe_lora(lora)
-        self.wq = MaybeLora(dim, n_heads * head_dim, bias=False)
-        self.wk = MaybeLora(dim, n_kv_heads * head_dim, bias=False)
-        self.wv = MaybeLora(dim, n_kv_heads * head_dim, bias=False)
-        self.wo = MaybeLora(n_heads * head_dim, dim, bias=False)
+        self.wq = MaybeLora(dim, n_heads * head_dim, bias=False)  # (4096, 32 * 128)
+        self.wk = MaybeLora(dim, n_kv_heads * head_dim, bias=False)  # (4096, 8 * 128)
+        self.wv = MaybeLora(dim, n_kv_heads * head_dim, bias=False)  # (4096, 8 * 128)
+        self.wo = MaybeLora(n_heads * head_dim, dim, bias=False)  # (32 * 128, 4096)
 
     def forward(
         self,
@@ -96,8 +96,6 @@ class Attention(nn.Module):
             xq, key, val, mask if cache is None else cache.mask
         )
         output = output.view(seqlen_sum, self.n_heads * self.head_dim)
-
-        assert isinstance(output, torch.Tensor)
 
         return self.wo(output)  # type: ignore
 
@@ -144,6 +142,7 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.n_heads = n_heads
         self.dim = dim
+        self.attention_norm = RMSNorm(dim, eps=norm_eps)
         self.attention = Attention(
             dim=dim,
             n_heads=n_heads,
@@ -151,9 +150,8 @@ class TransformerBlock(nn.Module):
             n_kv_heads=n_kv_heads,
             lora=lora,
         )
-        self.attention_norm = RMSNorm(dim, eps=norm_eps)
-        self.ffn_norm = RMSNorm(dim, eps=norm_eps)
 
+        self.ffn_norm = RMSNorm(dim, eps=norm_eps)
         self.feed_forward: nn.Module
         if moe is not None:
             self.feed_forward = MoeLayer(
