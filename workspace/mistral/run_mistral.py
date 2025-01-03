@@ -99,6 +99,17 @@ def getModelandTokenizeer(
                         max_batch_size,
                     )
 
+                elif model_version == "v3":
+                    from engine.mixtral_8x7b_v3 import TransformerV3
+
+                    model = TransformerV3.load(
+                        Path(mistral_models_path),
+                        NODE_RANK,
+                        gpu,
+                        global_group,
+                        max_batch_size,
+                    )
+
     else:
         if model_name == "Mistral-7B-Instruct-v0.3":
             tokenizer_path = f"{mistral_models_path}/tokenizer.model.v3"
