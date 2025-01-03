@@ -523,10 +523,11 @@ class TransformerV0(nn.Module):
 
         input_metadata = cache.get_input_metadata(seqlens)
         h = self.tok_embeddings(input_ids)
-        freqs_cis = self.freqs_cis[input_metadata.positions]
+        freqs_cis = self.freqs_cis[input_metadata[0].positions]
 
         for li in range(self.args.n_layers):
-            cache_view = cache.get_view(li, input_metadata)
+            cache_metadata = input_metadata[li]
+            cache_view = cache.get_view(li, cache_metadata)
             h = self.layers[str(li)](h, freqs_cis, cache_view)
 
         cache.update_seqlens(seqlens)
@@ -534,8 +535,12 @@ class TransformerV0(nn.Module):
         return outs.float()
 
     @staticmethod
-    def load(model_path: Path, gpu: torch.device, group) -> "Transformer":
+    def load(
+        model_path: Path, gpu: torch.device, group, max_batch_size
+    ) -> "TransformerV0":
         model_args = ModelArgs.from_hf_config(get_json(model_path / "config.json"))
+        model_args.max_batch_size = max_batch_size
+        model_args.sliding_window = None
         non_experts = torch.load(
             model_path / "non-experts.pt",
             map_location=gpu,

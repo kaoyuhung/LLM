@@ -14,9 +14,9 @@ model_path=$5
 output_folder="result"
 if [ ! -z "$6" ]; then
   model_version_arg="--model_version $6"
-  output_file="${mode}_${model}_${$6}_single_gpu.txt"
+  output_file="${mode}_${model}_${6}_single_node.txt"
 else
-  output_file="${mode}_${model}_single_gpu.txt"
+  output_file="${mode}_${model}_single_node.txt"
 fi
 
 mkdir -p $output_folder

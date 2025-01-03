@@ -1,12 +1,9 @@
 import json
 import logging
 import math
-import glob
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Union
-
-
 import torch
 import torch.distributed as dist
 import safetensors.torch
@@ -18,6 +15,15 @@ from mistral_inference.rope import precompute_freqs_cis
 from mistral_inference.vision_encoder import VisionLanguageAdapter, VisionTransformer
 from engine.cache import BufferCache, CacheInputMetadata
 from engine.transformer_layers import RMSNorm, TransformerBlock
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed._tensor import Shard, Replicate
+from torch.distributed.tensor.parallel import (
+    parallelize_module,
+    ColwiseParallel,
+    RowwiseParallel,
+    PrepareModuleInput,
+    SequenceParallel,
+)
 
 
 @dataclass
@@ -39,7 +45,8 @@ class Transformer(ModelBase, LoRALoaderMixin):
         self,
         args: TransformerArgs,
         pipeline_rank: int = 0,
-        num_ranks: int = 1,
+        num_pipeline_ranks: int = 1,
+        num_tp_ranks: int = 1,
         softmax_fp32: bool = True,
     ):
         super().__init__()
@@ -48,9 +55,10 @@ class Transformer(ModelBase, LoRALoaderMixin):
         self.n_layers = args.n_layers
         self._precomputed_freqs_cis: Optional[torch.Tensor] = None
         assert self.vocab_size > 0
-        assert pipeline_rank < num_ranks, (pipeline_rank, num_ranks)
+        assert pipeline_rank < num_pipeline_ranks, (pipeline_rank, num_pipeline_ranks)
         self.pipeline_rank = pipeline_rank
-        self.num_ranks = num_ranks
+        self.num_pipeline_ranks = num_pipeline_ranks
+        self.num_tp_ranks = num_tp_ranks
         self.softmax_fp32 = softmax_fp32
 
         # Modules specific to some ranks:
@@ -77,31 +85,31 @@ class Transformer(ModelBase, LoRALoaderMixin):
             for _ in range(args.n_layers)
         ]
 
-        # num_layers_per_rank = math.ceil(self.n_layers / self.num_ranks)
-        # if self.n_layers % self.num_ranks != 0:
+        # num_layers_per_rank = math.ceil(self.n_layers / self.num_pipeline_ranks)
+        # if self.n_layers % self.num_pipeline_ranks != 0:
         #     if self.pipeline_rank == 0:
         #         offset = 0
         #         num_layers_per_rank -= 1
         #     else:
         #         offset = self.pipeline_rank * num_layers_per_rank - 1
-        #     if self.pipeline_rank == self.num_ranks - 1:
+        #     if self.pipeline_rank == self.num_pipeline_ranks - 1:
         #         num_layers_per_rank += 1
         # else:
         # offset = self.pipeline_rank * num_layers_per_rank
         # end = min(self.n_layers, offset + num_layers_per_rank)
 
-        num_layers_per_rank = self.n_layers // self.num_ranks
-        remainder = self.n_layers % self.num_ranks
-        if self.num_ranks - self.pipeline_rank <= remainder:
+        num_layers_per_rank = self.n_layers // self.num_pipeline_ranks
+        remainder = self.n_layers % self.num_pipeline_ranks
+        if self.num_pipeline_ranks - self.pipeline_rank <= remainder:
             offset = self.pipeline_rank * num_layers_per_rank + (
-                remainder - (self.num_ranks - self.pipeline_rank)
+                remainder - (self.num_pipeline_ranks - self.pipeline_rank)
             )
             end = offset + num_layers_per_rank + 1
         else:
             offset = self.pipeline_rank * num_layers_per_rank
             end = offset + num_layers_per_rank
 
-        # for i in range(self.num_ranks):
+        # for i in range(self.num_pipeline_ranks):
         #     if i == self.pipeline_rank:
         #         print(self.pipeline_rank, offset, end)
         #     dist.barrier()
@@ -111,7 +119,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
         self.layers = nn.ModuleDict({str(i): layers[i] for i in range(offset, end)})
         self.n_local_layers = len(self.layers)
 
-        if pipeline_rank == num_ranks - 1:
+        if pipeline_rank == self.num_pipeline_ranks - 1:
             self.norm = RMSNorm(args.dim, eps=args.norm_eps)
             self.output = nn.Linear(args.dim, args.vocab_size, bias=False)
 
@@ -173,7 +181,6 @@ class Transformer(ModelBase, LoRALoaderMixin):
         input_metadata = cache.get_input_metadata(seqlens)
         # freqs_cis is always the same for every layer
         freqs_cis = self.freqs_cis[input_metadata[0].positions]
-
         for local_layer_id, layer in enumerate(self.layers.values()):
             # assert input_metadata is not None
             cache_metadata = input_metadata[local_layer_id]
@@ -183,7 +190,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
 
         cache.update_seqlens(seqlens)
 
-        if self.pipeline_rank < self.num_ranks - 1:
+        if self.pipeline_rank < self.num_pipeline_ranks - 1:
             dist.batch_isend_irecv([dist.P2POp(dist.isend, h, self.pipeline_rank + 1)])[
                 0
             ].wait()
@@ -201,7 +208,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
     ) -> torch.Tensor:
 
         h = self.forward_partial(input_ids, seqlens, cache=cache)
-        if self.pipeline_rank < self.num_ranks - 1:
+        if self.pipeline_rank < self.num_pipeline_ranks - 1:
             # ignore the intermediate activations as we'll get the final output from
             # the last stage
             outs = torch.empty(
@@ -211,8 +218,8 @@ class Transformer(ModelBase, LoRALoaderMixin):
             assert self.output is not None
             outs = self.output(h)
 
-        if self.num_ranks > 1:
-            dist.broadcast(outs, src=self.num_ranks - 1)
+        if self.num_pipeline_ranks > 1:
+            dist.broadcast(outs, src=self.num_pipeline_ranks - 1)
 
         if self.softmax_fp32:
             return outs.float()
@@ -236,7 +243,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
                     )
                     skipped.add(k)
             elif k.startswith("norm") or k.startswith("output"):
-                if self.pipeline_rank == self.num_ranks - 1:
+                if self.pipeline_rank == self.num_pipeline_ranks - 1:
                     state_to_load[k] = v
                 else:
                     logging.debug(
@@ -270,7 +277,8 @@ class Transformer(ModelBase, LoRALoaderMixin):
     def from_folder(
         folder: Union[Path, str],
         max_batch_size: int = 1,
-        num_ranks: int = 1,
+        num_pipeline_ranks: int = 1,
+        num_tp_ranks: int = 1,
         device: Union[torch.device, str] = "cuda",
         dtype: Optional[torch.dtype] = None,
         softmax_fp32: bool = True,
@@ -299,17 +307,25 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 model_args = TransformerArgs.from_dict(config)
 
         model_args.max_batch_size = max_batch_size
-        if num_ranks > 1:
-            pipeline_rank = dist.get_rank()
+
+        if num_pipeline_ranks > 1:
+            with torch.device("meta"):
+                model = Transformer(
+                    model_args,
+                    pipeline_rank=dist.get_rank(),
+                    num_pipeline_ranks=num_pipeline_ranks,
+                    num_tp_ranks=num_tp_ranks,
+                    softmax_fp32=softmax_fp32,
+                )
         else:
-            pipeline_rank = 0
-        with torch.device("meta"):
-            model = Transformer(
-                model_args,
-                pipeline_rank=pipeline_rank,
-                num_ranks=num_ranks,
-                softmax_fp32=softmax_fp32,
-            )
+            with torch.device("meta"):
+                model = Transformer(
+                    model_args,
+                    pipeline_rank=0,
+                    num_pipeline_ranks=1,
+                    num_tp_ranks=num_tp_ranks,
+                    softmax_fp32=softmax_fp32,
+                )
 
         pt_model_file = Path(folder) / "consolidated.00.pth"
         safetensors_model_file = Path(folder) / "consolidated.safetensors"
@@ -328,7 +344,57 @@ class Transformer(ModelBase, LoRALoaderMixin):
 
         model.load_state_dict(loaded, assign=True, strict=True)
 
-        return model.to(device=device, dtype=dtype)
+        if num_tp_ranks == 1:
+            return model.to(device=device, dtype=dtype)
+
+        else:
+            tp_mesh = init_device_mesh(device_type="cuda", mesh_shape=(num_tp_ranks,))
+            model_args.n_heads = model_args.n_heads // tp_mesh.size()
+            model_args.n_kv_heads = model_args.n_kv_heads // tp_mesh.size()
+            model = parallelize_module(
+                model,
+                tp_mesh,
+                {
+                    "tok_embeddings": RowwiseParallel(
+                        input_layouts=Replicate(),
+                        output_layouts=Shard(1),
+                    ),
+                    "norm": SequenceParallel(),
+                    "output": ColwiseParallel(
+                        input_layouts=Shard(1), output_layouts=Replicate()
+                    ),
+                },
+            )
+            for transformer_block in model.layers.values():
+                layer_tp_plan = {
+                    "attention_norm": SequenceParallel(),
+                    "attention": PrepareModuleInput(
+                        input_layouts=(Shard(1), None),
+                        desired_input_layouts=(Replicate(), None),
+                    ),
+                    "attention.wq": ColwiseParallel(),
+                    "attention.wk": ColwiseParallel(),
+                    "attention.wv": ColwiseParallel(),
+                    "attention.wo": RowwiseParallel(output_layouts=Shard(1)),
+                    "ffn_norm": SequenceParallel(),
+                    "feed_forward": PrepareModuleInput(
+                        input_layouts=(Shard(1),),
+                        desired_input_layouts=(Replicate(),),
+                    ),
+                    "feed_forward.w1": ColwiseParallel(),
+                    "feed_forward.w2": RowwiseParallel(output_layouts=Shard(1)),
+                    "feed_forward.w3": ColwiseParallel(),
+                }
+                attn_layer = transformer_block.attention
+                attn_layer.n_heads = attn_layer.n_heads // tp_mesh.size()
+                attn_layer.n_kv_heads = attn_layer.n_kv_heads // tp_mesh.size()
+                parallelize_module(
+                    module=transformer_block,
+                    device_mesh=tp_mesh,
+                    parallelize_plan=layer_tp_plan,
+                )
+
+            return model.to(device=device, dtype=dtype)
 
     def forward_profile(
         self,
@@ -393,7 +459,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
         if cache is not None:
             cache.update_seqlens(seqlens)
 
-        if self.pipeline_rank < self.num_ranks - 1:
+        if self.pipeline_rank < self.num_pipeline_ranks - 1:
             dist.batch_isend_irecv([dist.P2POp(dist.isend, h, self.pipeline_rank + 1)])[
                 0
             ].wait()
@@ -402,7 +468,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
             assert self.norm is not None
             h = self.norm(h)  # type: ignore
 
-        if self.pipeline_rank < self.num_ranks - 1:
+        if self.pipeline_rank < self.num_pipeline_ranks - 1:
             # ignore the intermediate activations as we'll get the final output from
             # the last stage
             outs = torch.empty(
@@ -412,41 +478,13 @@ class Transformer(ModelBase, LoRALoaderMixin):
             assert self.output is not None
             outs = self.output(h)
 
-        if self.num_ranks > 1:
-            dist.broadcast(outs, src=self.num_ranks - 1)
+        if self.num_pipeline_ranks > 1:
+            dist.broadcast(outs, src=self.num_pipeline_ranks - 1)
 
         if self.softmax_fp32:
             return outs.float()
         else:
             return outs
-
-    # @staticmethod
-    # def load(
-    #     model_path: Path, node_id: int, local_rank: int, gpu: torch.device, group
-    # ) -> "Transformer":
-
-    #     with open(Path(model_path) / "params.json", "r") as f:
-    #         model_args = TransformerArgs.from_dict(json.load(f))
-
-    #     # model_args = ModelArgs.from_hf_config(get_json(model_path / "config.json"))
-    #     non_experts = torch.load(
-    #         model_path / "non-experts-1-0.pt",
-    #         map_location=gpu,
-    #         weights_only=True,
-    #         mmap=True,
-    #     )
-    #     experts = torch.load(
-    #         model_path / f"experts-{node_id + LOCAL_RANK}.pt",
-    #         map_location=gpu,
-    #         weights_only=True,
-    #         mmap=True,
-    #     )
-
-    #     with torch.device("meta"):
-    #         model = Transformer(args=model_args, experts=Experts(experts), group=group)
-    #     model.load_state_dict(non_experts, assign=True, strict=True)
-
-    #     return model
 
 
 class TransformerMistral(ModelBase, LoRALoaderMixin):

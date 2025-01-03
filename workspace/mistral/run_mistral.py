@@ -22,7 +22,6 @@ def getModelandTokenizeer(
     model_name,
     mistral_models_path,
     max_batch_size,
-    gpu,
     dtype,
     distributed=False,
     model_version=None,
@@ -41,47 +40,79 @@ def getModelandTokenizeer(
             local_dir=mistral_models_path,
         )
 
-    if model_name == "Mistral-7B-Instruct-v0.3":
-        tokenizer_path = f"{mistral_models_path}/tokenizer.model.v3"
-
-    elif model_name == "Mixtral-8x7B-Instruct-v0.1":
-        tokenizer_path = f"{mistral_models_path}/tokenizer.model"
-
     if distributed:
-        dist.barrier()
-
-        if model_name == "Mistral-7B-Instruct-v0.3":
-            tokenizer = MistralTokenizer.from_file(tokenizer_path)
-            model = Transformer.from_folder(
-                folder=mistral_models_path,
-                max_batch_size=max_batch_size,
-                num_ranks=WORLD_SIZE,
-                device=gpu,
-                dtype=dtype,
+        if model_version == "TP":
+            device = "cuda"
+        else:
+            device = torch.device(f"cuda:{LOCAL_RANK}")
+            dist.init_process_group(
+                backend="nccl", world_size=WORLD_SIZE, rank=WORLD_RANK, device_id=device
             )
 
-        elif model_name == "Mixtral-8x7B-Instruct-v0.1":
-            tokenizer = MistralTokenizer.v1()
-
-            if not model_version:
+        if model_name == "Mistral-7B-Instruct-v0.3":
+            tokenizer = MistralTokenizer.from_file(
+                f"{mistral_models_path}/tokenizer.model.v3"
+            )
+            if not model_version or model_version == "PP":
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
                     max_batch_size=max_batch_size,
-                    num_ranks=WORLD_SIZE,
-                    device=gpu,
+                    num_pipeline_ranks=WORLD_SIZE,
+                    num_tp_ranks=1,
+                    device=device,
+                    dtype=dtype,
+                )
+            elif model_version == "TP":
+                model = Transformer.from_folder(
+                    folder=mistral_models_path,
+                    max_batch_size=max_batch_size,
+                    num_pipeline_ranks=1,
+                    num_tp_ranks=WORLD_SIZE,
+                    device=device,
+                    dtype=dtype,
+                )
+
+        elif model_name == "Mixtral-8x7B-Instruct-v0.1":
+            tokenizer = MistralTokenizer.v1()
+            if not model_version or model_version == "PP":
+                model = Transformer.from_folder(
+                    folder=mistral_models_path,
+                    max_batch_size=max_batch_size,
+                    num_pipeline_ranks=WORLD_SIZE,
+                    num_tp_ranks=1,
+                    device=device,
+                    dtype=dtype,
+                )
+            elif model_version == "TP":
+                model = Transformer.from_folder(
+                    folder=mistral_models_path,
+                    max_batch_size=max_batch_size,
+                    num_pipeline_ranks=1,
+                    num_tp_ranks=WORLD_SIZE,
+                    device=device,
                     dtype=dtype,
                 )
             else:
                 global_group = dist.new_group(
                     list(range(WORLD_SIZE)), use_local_synchronization=True
                 )
+                if model_version == "v0":
+                    from engine.mixtral_8x7b_v0 import TransformerV0
+
+                    model = TransformerV0.load(
+                        Path(mistral_models_path),
+                        device,
+                        global_group,
+                        max_batch_size,
+                    )
+
                 if model_version == "v1":
                     from engine.mixtral_8x7b_v1 import TransformerV1
 
                     model = TransformerV1.load(
                         Path(mistral_models_path),
                         NODE_RANK,
-                        gpu,
+                        device,
                         global_group,
                         max_batch_size,
                     )
@@ -89,11 +120,11 @@ def getModelandTokenizeer(
                 elif model_version == "v2":
                     from engine.mixtral_8x7b_v2 import TransformerV2, get_node_group
 
-                    node_group = get_node_group(NODE_RANK, gpu, global_group)
+                    node_group = get_node_group(NODE_RANK, device, global_group)
                     model = TransformerV2.load(
                         Path(mistral_models_path),
                         NODE_RANK,
-                        gpu,
+                        device,
                         node_group,
                         global_group,
                         max_batch_size,
@@ -105,18 +136,22 @@ def getModelandTokenizeer(
                     model = TransformerV3.load(
                         Path(mistral_models_path),
                         NODE_RANK,
-                        gpu,
+                        device,
                         global_group,
                         max_batch_size,
                     )
 
     else:
         if model_name == "Mistral-7B-Instruct-v0.3":
-            tokenizer_path = f"{mistral_models_path}/tokenizer.model.v3"
-            tokenizer = MistralTokenizer.from_file(tokenizer_path)
+            tokenizer = MistralTokenizer.from_file(
+                f"{mistral_models_path}/tokenizer.model.v3"
+            )
 
         model = Transformer.from_folder(
-            mistral_models_path, max_batch_size=max_batch_size, device=gpu, dtype=dtype
+            mistral_models_path,
+            max_batch_size=max_batch_size,
+            device=torch.device("cuda"),
+            dtype=dtype,
         )
 
     return model, tokenizer
@@ -137,17 +172,12 @@ def run_default(
     torch_compile: bool,
 ):
 
-    batch_size = min(batch_size, len(prompts))
+    model, tokenizer = getModelandTokenizeer(model_name, model_path, batch_size, dtype)
+    while len(prompts) < batch_size:
+        prompts.extend(prompts[: min(len(prompts), batch_size - len(prompts))])
     eval_nItrs = min(
         len(prompts) // batch_size + ((len(prompts) % batch_size) > 0), eval_nItrs
     )
-
-    device = torch.device("cuda")
-    model, tokenizer = getModelandTokenizeer(
-        model_name, model_path, batch_size, device, dtype
-    )
-    model.eval()
-
     if torch_compile:
         model = torch.compile(model, mode="reduce-overhead")
 
@@ -281,20 +311,16 @@ def run_dist(
     dtype: torch.dtype,
     model_version: Optional[str],
 ):
-
-    gpu = torch.device(f"cuda:{LOCAL_RANK}")
-    dist.init_process_group(
-        "nccl", rank=WORLD_RANK, world_size=WORLD_SIZE, device_id=gpu
+    model, tokenizer = getModelandTokenizeer(
+        model_name, model_path, batch_size, dtype, True, model_version
     )
+    model.eval()
     prompts = load_data(prompt_path, True, LOCAL_RANK)
-    batch_size = min(batch_size, len(prompts))
+    while len(prompts) < batch_size:
+        prompts.extend(prompts[: min(len(prompts), batch_size - len(prompts))])
     eval_nItrs = min(
         len(prompts) // batch_size + ((len(prompts) % batch_size) > 0), eval_nItrs
     )
-    model, tokenizer = getModelandTokenizeer(
-        model_name, model_path, batch_size, gpu, dtype, True, model_version
-    )
-    model.eval()
 
     if mode == "printModel":
         for current_rank in range(WORLD_SIZE):
@@ -510,7 +536,9 @@ if __name__ == "__main__":
     }
     parser.add_argument("--dtype", type=str, default="bf16", choices=dtype_map.keys())
     parser.add_argument("--torch_compile", type=eval, default=False)
-    parser.add_argument("--model_version", type=str, choices=["v0", "v1", "v2", "v3"])
+    parser.add_argument(
+        "--model_version", type=str, choices=["v0", "v1", "v2", "v3", "TP"]
+    )
     args = parser.parse_args()
 
     setup_seed(args.seed)

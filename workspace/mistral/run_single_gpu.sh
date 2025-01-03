@@ -13,7 +13,7 @@ model_path=$4
 output_folder="result"
 if [ ! -z "$5" ]; then
   model_version_arg="--model_version $5"
-  output_file="${mode}_${model}_${$5}_single_gpu.txt"
+  output_file="${mode}_${model}_${5}_single_gpu.txt"
 else
   output_file="${mode}_${model}_single_gpu.txt"
 fi
