@@ -76,9 +76,38 @@ class Transformer(ModelBase, LoRALoaderMixin):
             )
             for _ in range(args.n_layers)
         ]
-        num_layers_per_rank = math.ceil(self.n_layers / self.num_ranks)
-        offset = self.pipeline_rank * num_layers_per_rank
-        end = min(self.n_layers, offset + num_layers_per_rank)
+
+        # num_layers_per_rank = math.ceil(self.n_layers / self.num_ranks)
+        # if self.n_layers % self.num_ranks != 0:
+        #     if self.pipeline_rank == 0:
+        #         offset = 0
+        #         num_layers_per_rank -= 1
+        #     else:
+        #         offset = self.pipeline_rank * num_layers_per_rank - 1
+        #     if self.pipeline_rank == self.num_ranks - 1:
+        #         num_layers_per_rank += 1
+        # else:
+        # offset = self.pipeline_rank * num_layers_per_rank
+        # end = min(self.n_layers, offset + num_layers_per_rank)
+
+        num_layers_per_rank = self.n_layers // self.num_ranks
+        remainder = self.n_layers % self.num_ranks
+        if self.num_ranks - self.pipeline_rank <= remainder:
+            offset = self.pipeline_rank * num_layers_per_rank + (
+                remainder - (self.num_ranks - self.pipeline_rank)
+            )
+            end = offset + num_layers_per_rank + 1
+        else:
+            offset = self.pipeline_rank * num_layers_per_rank
+            end = offset + num_layers_per_rank
+
+        # for i in range(self.num_ranks):
+        #     if i == self.pipeline_rank:
+        #         print(self.pipeline_rank, offset, end)
+        #     dist.barrier()
+        # dist.destroy_process_group()
+        # exit()
+
         self.layers = nn.ModuleDict({str(i): layers[i] for i in range(offset, end)})
         self.n_local_layers = len(self.layers)
 
