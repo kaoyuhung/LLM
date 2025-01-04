@@ -11,6 +11,7 @@ from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 
 
+@torch.inference_mode()
 def measure_generate(
     prompts: List[str],
     tokenizer: MistralTokenizer,
@@ -38,7 +39,7 @@ def measure_generate(
         model.n_local_layers,
         model.args.max_batch_size,
         cache_window,
-        model.args.n_kv_heads,
+        model.n_kv_heads,
         model.args.head_dim,
         model.args.sliding_window,
     )
@@ -50,21 +51,11 @@ def measure_generate(
     last_token_prelogits = None
 
     input_ids = sum(encoded_prompts, [])
-
-    if model.num_tp_ranks > 1:
-        with torch.no_grad():
-            prelogits = model.forward(
-                torch.tensor(input_ids, device=model.device, dtype=torch.long),
-                seqlens=seqlens,
-                cache=cache,
-            )
-    else:
-        with torch.inference_mode():
-            prelogits = model.forward(
-                torch.tensor(input_ids, device=model.device, dtype=torch.long),
-                seqlens=seqlens,
-                cache=cache,
-            )
+    prelogits = model.forward(
+        torch.tensor(input_ids, device=model.device, dtype=torch.long),
+        seqlens=seqlens,
+        cache=cache,
+    )
     logits = torch.log_softmax(prelogits, dim=-1)
 
     offset = 0
@@ -110,16 +101,7 @@ def measure_generate(
 
         generated_tensors.append(next_token[:, None])
 
-        if model.num_tp_ranks > 1:
-            with torch.no_grad():
-                last_token_prelogits = model.forward(
-                    next_token, seqlens=[1] * B, cache=cache
-                )
-        else:
-            with torch.inference_mode():
-                last_token_prelogits = model.forward(
-                    next_token, seqlens=[1] * B, cache=cache
-                )
+        last_token_prelogits = model.forward(next_token, seqlens=[1] * B, cache=cache)
 
         assert last_token_prelogits.shape == (B, V)
 
@@ -173,7 +155,7 @@ def profile_generate(
         model.n_local_layers,
         model.args.max_batch_size,
         cache_window,
-        model.args.n_kv_heads,
+        model.n_kv_heads,
         model.args.head_dim,
         model.args.sliding_window,
     )
@@ -284,7 +266,7 @@ def profile_generate(
     return generated_tokens, logprobs
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def generate(
     prompts: List[str],
     tokenizer: MistralTokenizer,
@@ -323,7 +305,7 @@ def generate(
         model.n_local_layers,
         model.args.max_batch_size,
         cache_window,
-        model.args.n_kv_heads,
+        model.n_kv_heads,
         model.args.head_dim,
         model.args.sliding_window,
     )

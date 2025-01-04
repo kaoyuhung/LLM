@@ -8,3 +8,4 @@ workspace/prompts/*_bench
 result*
 workspace/test
 examples
+test*.py

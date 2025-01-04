@@ -473,6 +473,7 @@ class TransformerV0(nn.Module):
     def __init__(self, args: ModelArgs, experts: Experts, group):
         super().__init__()
         self.args = args
+        self.n_kv_heads = self.args.n_kv_heads
         self._precomputed_freqs_cis: torch.Tensor = None
         self.tok_embeddings = nn.Embedding(args.vocab_size, args.dim)
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
@@ -485,6 +486,7 @@ class TransformerV0(nn.Module):
                 for li in range(args.n_layers)
             }
         )
+        self.n_local_layers = args.n_layers
 
     @property
     def dtype(self) -> torch.dtype:
@@ -548,7 +550,7 @@ class TransformerV0(nn.Module):
             mmap=True,
         )
         experts = torch.load(
-            model_path / f"experts-tp-{WORLD_RANK}.pt",
+            model_path / f"experts-{WORLD_RANK}.pt",
             map_location=gpu,
             weights_only=True,
             mmap=True,

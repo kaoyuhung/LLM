@@ -265,6 +265,7 @@ class TransformerV1(nn.Module):
     def __init__(self, args: ModelArgs, experts: Experts, group):
         super().__init__()
         self.args = args
+        self.n_kv_heads = self.args.n_kv_heads
         self._precomputed_freqs_cis: torch.Tensor = None
         self.tok_embeddings = nn.Embedding(args.vocab_size, args.dim)
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
@@ -335,13 +336,13 @@ class TransformerV1(nn.Module):
         model_args.max_batch_size = max_batch_size
         model_args.sliding_window = None
         non_experts = torch.load(
-            model_path / "non-experts-1-0.pt",
+            model_path / "non-experts.pt",
             map_location=gpu,
             weights_only=True,
             mmap=True,
         )
         experts = torch.load(
-            model_path / f"experts-{node_id + LOCAL_RANK}.pt",
+            model_path / f"experts-{node_id}-{LOCAL_RANK}.pt",
             map_location=gpu,
             weights_only=True,
             mmap=True,

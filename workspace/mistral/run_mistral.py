@@ -10,8 +10,6 @@ from typing import Optional
 from engine.transformer import Transformer
 from engine.generate import generate, profile_generate, measure_generate
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
-from mistral_common.protocol.instruct.messages import UserMessage
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from huggingface_hub import snapshot_download
 from util import setup_seed, load_data
 from torchinfo import summary
@@ -19,12 +17,13 @@ from tqdm import tqdm
 
 
 def getModelandTokenizeer(
-    model_name,
-    mistral_models_path,
-    max_batch_size,
-    dtype,
-    distributed=False,
-    model_version=None,
+    model_name: str,
+    mistral_models_path: str,
+    max_batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    distributed: bool = False,
+    model_version: Optional[str] = None,
 ):
 
     mistral_models_path = Path(mistral_models_path)
@@ -41,14 +40,12 @@ def getModelandTokenizeer(
         )
 
     if distributed:
-        if model_version == "TP":
-            device = "cuda"
-        else:
-            device = torch.device(f"cuda:{LOCAL_RANK}")
-            dist.init_process_group(
-                backend="nccl", world_size=WORLD_SIZE, rank=WORLD_RANK, device_id=device
-            )
-
+        # gather_tensor = torch.zeros((WORLD_SIZE, 2), dtype=torch.int, device=device)
+        # dist.all_gather_into_tensor(
+        #     gather_tensor,
+        #     torch.tensor([NODE_RANK, WORLD_RANK], dtype=torch.int, device=device),
+        # )
+        # RanksOnSameNode = gather_tensor[gather_tensor[:, 0] == NODE_RANK, 1].tolist()
         if model_name == "Mistral-7B-Instruct-v0.3":
             tokenizer = MistralTokenizer.from_file(
                 f"{mistral_models_path}/tokenizer.model.v3"
@@ -57,6 +54,7 @@ def getModelandTokenizeer(
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
                     max_batch_size=max_batch_size,
+                    pipeline_rank=WORLD_RANK,
                     num_pipeline_ranks=WORLD_SIZE,
                     num_tp_ranks=1,
                     device=device,
@@ -66,8 +64,13 @@ def getModelandTokenizeer(
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
                     max_batch_size=max_batch_size,
+                    pipeline_rank=0,
                     num_pipeline_ranks=1,
+                    tp_rank=WORLD_RANK,
                     num_tp_ranks=WORLD_SIZE,
+                    tp_gorup=dist.new_group(
+                        ranks=list(range(WORLD_SIZE)), backend="nccl"
+                    ),
                     device=device,
                     dtype=dtype,
                 )
@@ -78,6 +81,7 @@ def getModelandTokenizeer(
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
                     max_batch_size=max_batch_size,
+                    pipeline_rank=WORLD_RANK,
                     num_pipeline_ranks=WORLD_SIZE,
                     num_tp_ranks=1,
                     device=device,
@@ -87,8 +91,13 @@ def getModelandTokenizeer(
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
                     max_batch_size=max_batch_size,
+                    pipeline_rank=0,
                     num_pipeline_ranks=1,
+                    tp_rank=WORLD_RANK,
                     num_tp_ranks=WORLD_SIZE,
+                    tp_gorup=dist.new_group(
+                        ranks=list(range(WORLD_SIZE)), backend="nccl"
+                    ),
                     device=device,
                     dtype=dtype,
                 )
@@ -150,7 +159,7 @@ def getModelandTokenizeer(
         model = Transformer.from_folder(
             mistral_models_path,
             max_batch_size=max_batch_size,
-            device=torch.device("cuda"),
+            device=device,
             dtype=dtype,
         )
 
@@ -172,7 +181,9 @@ def run_default(
     torch_compile: bool,
 ):
 
-    model, tokenizer = getModelandTokenizeer(model_name, model_path, batch_size, dtype)
+    model, tokenizer = getModelandTokenizeer(
+        model_name, model_path, batch_size, torch.device("cuda"), dtype
+    )
     while len(prompts) < batch_size:
         prompts.extend(prompts[: min(len(prompts), batch_size - len(prompts))])
     eval_nItrs = min(
@@ -209,10 +220,6 @@ def run_default(
                 print("-" * 100)
 
     elif mode == "nsys_profile":
-        completion_request = ChatCompletionRequest(
-            messages=[UserMessage(content=prompts[0])]
-        )
-        tokens = tokenizer.encode_chat_completion(completion_request).tokens
         for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
             out_tokens, _ = generate(
                 [prompts[0]],
@@ -311,8 +318,12 @@ def run_dist(
     dtype: torch.dtype,
     model_version: Optional[str],
 ):
+    device = torch.device(f"cuda:{LOCAL_RANK}")
+    dist.init_process_group(
+        backend="nccl", world_size=WORLD_SIZE, rank=WORLD_RANK, device_id=device
+    )
     model, tokenizer = getModelandTokenizeer(
-        model_name, model_path, batch_size, dtype, True, model_version
+        model_name, model_path, batch_size, device, dtype, True, model_version
     )
     model.eval()
     prompts = load_data(prompt_path, True, LOCAL_RANK)
@@ -503,7 +514,7 @@ if __name__ == "__main__":
         default="weights/Mistral-7B-Instruct-v0.3",
     )
     parser.add_argument("--max_tokens", type=int, default=128)
-    parser.add_argument("--T", type=float, default=0.6, help="temperature")
+    parser.add_argument("--T", type=float, default=0, help="temperature")
     parser.add_argument("--P", type=float, default=0.9, help="top_p")
     parser.add_argument(
         "--mode",
@@ -537,7 +548,7 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, default="bf16", choices=dtype_map.keys())
     parser.add_argument("--torch_compile", type=eval, default=False)
     parser.add_argument(
-        "--model_version", type=str, choices=["v0", "v1", "v2", "v3", "TP"]
+        "--model_version", type=str, choices=["v0", "v1", "v2", "v3", "PP", "TP"]
     )
     args = parser.parse_args()
 

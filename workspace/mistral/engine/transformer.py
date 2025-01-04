@@ -15,15 +15,7 @@ from mistral_inference.rope import precompute_freqs_cis
 from mistral_inference.vision_encoder import VisionLanguageAdapter, VisionTransformer
 from engine.cache import BufferCache, CacheInputMetadata
 from engine.transformer_layers import RMSNorm, TransformerBlock
-from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed._tensor import Shard, Replicate
-from torch.distributed.tensor.parallel import (
-    parallelize_module,
-    ColwiseParallel,
-    RowwiseParallel,
-    PrepareModuleInput,
-    SequenceParallel,
-)
+from engine.transformer_layers_tp import TransformerBlockTP
 
 
 @dataclass
@@ -46,7 +38,9 @@ class Transformer(ModelBase, LoRALoaderMixin):
         args: TransformerArgs,
         pipeline_rank: int = 0,
         num_pipeline_ranks: int = 1,
+        tp_rank: int = 0,
         num_tp_ranks: int = 1,
+        tp_group: dist.distributed_c10d.ProcessGroup = None,
         softmax_fp32: bool = True,
     ):
         super().__init__()
@@ -58,32 +52,88 @@ class Transformer(ModelBase, LoRALoaderMixin):
         assert pipeline_rank < num_pipeline_ranks, (pipeline_rank, num_pipeline_ranks)
         self.pipeline_rank = pipeline_rank
         self.num_pipeline_ranks = num_pipeline_ranks
+        self.tp_rank = tp_rank
         self.num_tp_ranks = num_tp_ranks
+        self.tp_group = tp_group
         self.softmax_fp32 = softmax_fp32
 
         # Modules specific to some ranks:
         self.tok_embeddings: Optional[nn.Embedding] = None
         self.norm: Optional[RMSNorm] = None
         self.output: Optional[nn.Linear] = None
-        if pipeline_rank == 0:
-            self.tok_embeddings = nn.Embedding(
-                args.vocab_size, args.dim
-            )  # (32000, 4096)
 
         # Initialize all layers but slice off those not of this rank.
-        layers = [
-            TransformerBlock(
-                dim=args.dim,
-                hidden_dim=args.hidden_dim,
-                n_heads=args.n_heads,
-                n_kv_heads=args.n_kv_heads,
-                head_dim=args.head_dim,
-                norm_eps=args.norm_eps,
-                lora=args.lora,
-                moe=args.moe,
-            )
-            for _ in range(args.n_layers)
-        ]
+        if self.num_tp_ranks > 1:
+            assert self.tp_group != None
+            remainder = args.dim % self.num_tp_ranks
+            tp_dim = args.dim // self.num_tp_ranks
+            self.tp_dim_off_list = []
+            for rank in range(self.num_tp_ranks):
+                tp_dim_off = rank * tp_dim
+                if self.num_tp_ranks - rank <= remainder:
+                    self.tp_dim_off_list.append(
+                        (
+                            tp_dim + 1,
+                            tp_dim_off + remainder - (self.num_tp_ranks - rank),
+                        )
+                    )
+                else:
+                    self.tp_dim_off_list.append((tp_dim, tp_dim_off))
+            self.tp_dim, self.tp_dim_off = self.tp_dim_off_list[self.tp_rank]
+
+            remainder = args.hidden_dim % self.num_tp_ranks
+            self.tp_hidden_dim = args.hidden_dim // self.num_tp_ranks
+            self.tp_hidden_dim_off = self.tp_rank * self.tp_hidden_dim
+            if self.num_tp_ranks - self.tp_rank <= remainder:
+                self.tp_hidden_dim += 1
+                self.tp_hidden_dim_off += remainder - (self.num_tp_ranks - self.tp_rank)
+
+            n_head_per_group = args.n_heads // args.n_kv_heads
+            remainder = args.n_kv_heads % self.num_tp_ranks
+            self.n_kv_heads = args.n_kv_heads // self.num_tp_ranks
+            self.n_kv_heads_off = self.tp_rank * self.n_kv_heads
+            self.n_heads = self.n_kv_heads * n_head_per_group
+            self.n_heads_off = self.tp_rank * self.n_heads
+            if self.num_tp_ranks - self.tp_rank <= remainder:
+                self.n_kv_heads += 1
+                self.n_kv_heads_off += remainder - (self.num_tp_ranks - self.tp_rank)
+                self.n_heads += n_head_per_group
+                self.n_heads_off += (
+                    remainder - (self.num_tp_ranks - self.tp_rank)
+                ) * n_head_per_group
+
+            layers = [
+                TransformerBlockTP(
+                    dim=args.dim,
+                    hidden_dim=self.tp_hidden_dim,
+                    n_heads=self.n_heads,
+                    n_kv_heads=self.n_kv_heads,
+                    head_dim=args.head_dim,
+                    norm_eps=args.norm_eps,
+                    lora=args.lora,
+                    moe=args.moe,
+                    tp_rank=tp_rank,
+                    num_tp_ranks=num_tp_ranks,
+                    node_group=tp_group,
+                )
+                for _ in range(args.n_layers)
+            ]
+        else:
+            self.n_heads = args.n_heads
+            self.n_kv_heads = args.n_kv_heads
+            layers = [
+                TransformerBlock(
+                    dim=args.dim,
+                    hidden_dim=args.hidden_dim,
+                    n_heads=args.n_heads,
+                    n_kv_heads=args.n_kv_heads,
+                    head_dim=args.head_dim,
+                    norm_eps=args.norm_eps,
+                    lora=args.lora,
+                    moe=args.moe,
+                )
+                for _ in range(args.n_layers)
+            ]
 
         # num_layers_per_rank = math.ceil(self.n_layers / self.num_pipeline_ranks)
         # if self.n_layers % self.num_pipeline_ranks != 0:
@@ -109,19 +159,21 @@ class Transformer(ModelBase, LoRALoaderMixin):
             offset = self.pipeline_rank * num_layers_per_rank
             end = offset + num_layers_per_rank
 
-        # for i in range(self.num_pipeline_ranks):
-        #     if i == self.pipeline_rank:
-        #         print(self.pipeline_rank, offset, end)
-        #     dist.barrier()
-        # dist.destroy_process_group()
-        # exit()
+        if pipeline_rank == 0:
+            self.tok_embeddings = nn.Embedding(
+                args.vocab_size, args.dim if self.num_tp_ranks == 1 else self.tp_dim
+            )  # (32000, 4096)
 
         self.layers = nn.ModuleDict({str(i): layers[i] for i in range(offset, end)})
         self.n_local_layers = len(self.layers)
 
         if pipeline_rank == self.num_pipeline_ranks - 1:
             self.norm = RMSNorm(args.dim, eps=args.norm_eps)
-            self.output = nn.Linear(args.dim, args.vocab_size, bias=False)
+            self.output = nn.Linear(
+                args.dim,
+                args.vocab_size,
+                bias=False,
+            )
 
     @property
     def dtype(self) -> torch.dtype:
@@ -166,9 +218,17 @@ class Transformer(ModelBase, LoRALoaderMixin):
         #     len(seqlens) <= self.args.max_batch_size
         # ), f"Max batch size is {self.args.max_batch_size}, got batch size of {len(seqlens)}"
         # assert sum(seqlens) == num_toks, (sum(seqlens), num_toks)
-
         if self.pipeline_rank == 0:
-            h = self.tok_embeddings(input_ids)
+            if self.num_tp_ranks > 1:
+                gather_list = [
+                    torch.empty(num_toks, tp_dim, device=self.device, dtype=self.dtype)
+                    for tp_dim, _ in self.tp_dim_off_list
+                ]
+                dist.all_gather(gather_list, self.tok_embeddings(input_ids))
+                h = torch.cat(gather_list, dim=1)
+            else:
+                h = self.tok_embeddings(input_ids)
+
         else:
             h = torch.empty(
                 num_toks, self.args.dim, device=self.device, dtype=self.dtype
@@ -206,7 +266,6 @@ class Transformer(ModelBase, LoRALoaderMixin):
         seqlens: List[int],
         cache: Optional[BufferCache] = None,
     ) -> torch.Tensor:
-
         h = self.forward_partial(input_ids, seqlens, cache=cache)
         if self.pipeline_rank < self.num_pipeline_ranks - 1:
             # ignore the intermediate activations as we'll get the final output from
@@ -234,6 +293,8 @@ class Transformer(ModelBase, LoRALoaderMixin):
         for k, v in state_dict.items():
             if k.startswith("tok_embeddings"):
                 if self.pipeline_rank == 0:
+                    if self.num_tp_ranks > 1:
+                        v = v[:, self.tp_dim_off : self.tp_dim_off + self.tp_dim]
                     state_to_load[k] = v
                 else:
                     logging.debug(
@@ -255,6 +316,42 @@ class Transformer(ModelBase, LoRALoaderMixin):
             elif k.startswith("layers"):
                 layer_id = k.split(".")[1]
                 if layer_id in self.layers:
+                    if self.num_tp_ranks > 1:
+                        if k.endswith("w1.weight") or k.endswith("w3.weight"):
+                            v = v[
+                                self.tp_hidden_dim_off : self.tp_hidden_dim_off
+                                + self.tp_hidden_dim,
+                                :,
+                            ]
+                        elif k.endswith("w2.weight"):
+                            v = v[
+                                :,
+                                self.tp_hidden_dim_off : self.tp_hidden_dim_off
+                                + self.tp_hidden_dim,
+                            ]
+                        elif k.endswith("wq.weight"):
+                            v = v[
+                                self.n_heads_off
+                                * self.args.head_dim : (self.n_heads_off + self.n_heads)
+                                * self.args.head_dim,
+                                :,
+                            ]
+                        elif k.endswith("wk.weight") or k.endswith("wv.weight"):
+                            v = v[
+                                self.n_kv_heads_off
+                                * self.args.head_dim : (
+                                    self.n_kv_heads_off + self.n_kv_heads
+                                )
+                                * self.args.head_dim,
+                                :,
+                            ]
+                        elif k.endswith("wo.weight"):
+                            v = v[
+                                :,
+                                self.n_heads_off
+                                * self.args.head_dim : (self.n_heads_off + self.n_heads)
+                                * self.args.head_dim,
+                            ]
                     state_to_load[k] = v
                 else:
                     logging.debug(
@@ -277,8 +374,11 @@ class Transformer(ModelBase, LoRALoaderMixin):
     def from_folder(
         folder: Union[Path, str],
         max_batch_size: int = 1,
+        pipeline_rank: int = 0,
         num_pipeline_ranks: int = 1,
+        tp_rank: int = 0,
         num_tp_ranks: int = 1,
+        tp_gorup: dist.distributed_c10d.ProcessGroup = None,
         device: Union[torch.device, str] = "cuda",
         dtype: Optional[torch.dtype] = None,
         softmax_fp32: bool = True,
@@ -307,25 +407,16 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 model_args = TransformerArgs.from_dict(config)
 
         model_args.max_batch_size = max_batch_size
-
-        if num_pipeline_ranks > 1:
-            with torch.device("meta"):
-                model = Transformer(
-                    model_args,
-                    pipeline_rank=dist.get_rank(),
-                    num_pipeline_ranks=num_pipeline_ranks,
-                    num_tp_ranks=num_tp_ranks,
-                    softmax_fp32=softmax_fp32,
-                )
-        else:
-            with torch.device("meta"):
-                model = Transformer(
-                    model_args,
-                    pipeline_rank=0,
-                    num_pipeline_ranks=1,
-                    num_tp_ranks=num_tp_ranks,
-                    softmax_fp32=softmax_fp32,
-                )
+        with torch.device("meta"):
+            model = Transformer(
+                model_args,
+                pipeline_rank=pipeline_rank,
+                num_pipeline_ranks=num_pipeline_ranks,
+                tp_rank=tp_rank,
+                num_tp_ranks=num_tp_ranks,
+                tp_group=tp_gorup,
+                softmax_fp32=softmax_fp32,
+            )
 
         pt_model_file = Path(folder) / "consolidated.00.pth"
         safetensors_model_file = Path(folder) / "consolidated.safetensors"
@@ -344,57 +435,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
 
         model.load_state_dict(loaded, assign=True, strict=True)
 
-        if num_tp_ranks == 1:
-            return model.to(device=device, dtype=dtype)
-
-        else:
-            tp_mesh = init_device_mesh(device_type="cuda", mesh_shape=(num_tp_ranks,))
-            model_args.n_heads = model_args.n_heads // tp_mesh.size()
-            model_args.n_kv_heads = model_args.n_kv_heads // tp_mesh.size()
-            model = parallelize_module(
-                model,
-                tp_mesh,
-                {
-                    "tok_embeddings": RowwiseParallel(
-                        input_layouts=Replicate(),
-                        output_layouts=Shard(1),
-                    ),
-                    "norm": SequenceParallel(),
-                    "output": ColwiseParallel(
-                        input_layouts=Shard(1), output_layouts=Replicate()
-                    ),
-                },
-            )
-            for transformer_block in model.layers.values():
-                layer_tp_plan = {
-                    "attention_norm": SequenceParallel(),
-                    "attention": PrepareModuleInput(
-                        input_layouts=(Shard(1), None),
-                        desired_input_layouts=(Replicate(), None),
-                    ),
-                    "attention.wq": ColwiseParallel(),
-                    "attention.wk": ColwiseParallel(),
-                    "attention.wv": ColwiseParallel(),
-                    "attention.wo": RowwiseParallel(output_layouts=Shard(1)),
-                    "ffn_norm": SequenceParallel(),
-                    "feed_forward": PrepareModuleInput(
-                        input_layouts=(Shard(1),),
-                        desired_input_layouts=(Replicate(),),
-                    ),
-                    "feed_forward.w1": ColwiseParallel(),
-                    "feed_forward.w2": RowwiseParallel(output_layouts=Shard(1)),
-                    "feed_forward.w3": ColwiseParallel(),
-                }
-                attn_layer = transformer_block.attention
-                attn_layer.n_heads = attn_layer.n_heads // tp_mesh.size()
-                attn_layer.n_kv_heads = attn_layer.n_kv_heads // tp_mesh.size()
-                parallelize_module(
-                    module=transformer_block,
-                    device_mesh=tp_mesh,
-                    parallelize_plan=layer_tp_plan,
-                )
-
-            return model.to(device=device, dtype=dtype)
+        return model.to(device=device, dtype=dtype)
 
     def forward_profile(
         self,
@@ -650,7 +691,6 @@ class TransformerMistral(ModelBase, LoRALoaderMixin):
                 cache_view = cache.get_view(local_layer_id, cache_metadata)
             else:
                 cache_view = None
-            # print(cache_view.mask.q_seqinfo.seqstart.device)
             h = layer(h, freqs_cis, cache_view)
 
         if cache is not None:
