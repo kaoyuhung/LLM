@@ -41,6 +41,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
         tp_rank: int = 0,
         num_tp_ranks: int = 1,
         tp_group: dist.distributed_c10d.ProcessGroup = None,
+        RanksOnNextNode: list = None,
         softmax_fp32: bool = True,
     ):
         super().__init__()
@@ -55,6 +56,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
         self.tp_rank = tp_rank
         self.num_tp_ranks = num_tp_ranks
         self.tp_group = tp_group
+        self.RanksOnNextNode = RanksOnNextNode
         self.softmax_fp32 = softmax_fp32
 
         # Modules specific to some ranks:
@@ -62,9 +64,16 @@ class Transformer(ModelBase, LoRALoaderMixin):
         self.norm: Optional[RMSNorm] = None
         self.output: Optional[nn.Linear] = None
 
+        if (
+            self.num_pipeline_ranks > 1
+            and self.pipeline_rank != self.num_pipeline_ranks - 1
+        ):
+            assert self.RanksOnNextNode != None
+
         # Initialize all layers but slice off those not of this rank.
         if self.num_tp_ranks > 1:
             assert self.tp_group != None
+
             remainder = args.dim % self.num_tp_ranks
             tp_dim = args.dim // self.num_tp_ranks
             self.tp_dim_off_list = []
@@ -219,6 +228,10 @@ class Transformer(ModelBase, LoRALoaderMixin):
         # ), f"Max batch size is {self.args.max_batch_size}, got batch size of {len(seqlens)}"
         # assert sum(seqlens) == num_toks, (sum(seqlens), num_toks)
         if self.pipeline_rank == 0:
+            print(dist.get_rank(), "check1")
+            dist.barrier()
+            dist.destroy_process_group()
+            exit()
             if self.num_tp_ranks > 1:
                 gather_list = [
                     torch.empty(num_toks, tp_dim, device=self.device, dtype=self.dtype)
@@ -230,12 +243,16 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 h = self.tok_embeddings(input_ids)
 
         else:
+            print(dist.get_rank(), "check2")
+            dist.barrier()
+            dist.destroy_process_group()
+            exit()
             h = torch.empty(
                 num_toks, self.args.dim, device=self.device, dtype=self.dtype
             )
-            dist.batch_isend_irecv([dist.P2POp(dist.irecv, h, self.pipeline_rank - 1)])[
-                0
-            ].wait()
+            dist.batch_isend_irecv(
+                [dist.P2POp(dist.irecv, h, dist.get_rank() - self.tp_rank - 1)]
+            )[0].wait()
 
         input_metadata: List[CacheInputMetadata] | List[SimpleInputMetadata]
         input_metadata = cache.get_input_metadata(seqlens)
@@ -251,9 +268,12 @@ class Transformer(ModelBase, LoRALoaderMixin):
         cache.update_seqlens(seqlens)
 
         if self.pipeline_rank < self.num_pipeline_ranks - 1:
-            dist.batch_isend_irecv([dist.P2POp(dist.isend, h, self.pipeline_rank + 1)])[
-                0
-            ].wait()
+            if self.tp_rank == self.num_tp_ranks - 1:
+                reqs = dist.batch_isend_irecv(
+                    [dist.P2POp(dist.isend, h, rank) for rank in self.RanksOnNextNode]
+                )
+                for req in reqs:
+                    req.wait()
             return h
         else:
             # Last rank has a final normalization step.
@@ -379,6 +399,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
         tp_rank: int = 0,
         num_tp_ranks: int = 1,
         tp_gorup: dist.distributed_c10d.ProcessGroup = None,
+        RanksOnNextNode: list = None,
         device: Union[torch.device, str] = "cuda",
         dtype: Optional[torch.dtype] = None,
         softmax_fp32: bool = True,
@@ -415,6 +436,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 tp_rank=tp_rank,
                 num_tp_ranks=num_tp_ranks,
                 tp_group=tp_gorup,
+                RanksOnNextNode=RanksOnNextNode,
                 softmax_fp32=softmax_fp32,
             )
 
