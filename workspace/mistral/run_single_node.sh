@@ -33,6 +33,16 @@ if [ $mode = "measure" ]; then
         run_mistral.py --mode $mode --model $model --model_path $model_path --eval_nItrs $eval_nItrs --batch_size $N $model_version_arg \
         >> $output_folder/$output_file
     done
+
+elif [ $mode = "nsys_profile" ]; then
+    nsys profile --cudabacktrace=true --capture-range=cudaProfilerApi --capture-range-end=stop --sample=none -f true -o $output_folder/$output_file \
+      torchrun --standalone --nnodes=1 --nproc-per-node=$nproc \
+        run_mistral.py --mode $mode --model $model --model_path $model_path --eval_nItrs $eval_nItrs --batch_size 1 $model_version_arg --max_tokens 5
+
+elif [ $mode = "profile" ]; then
+    torchrun --standalone --nnodes=1 --nproc-per-node=$nproc \
+      run_mistral.py --mode $mode --model $model --model_path $model_path --eval_nItrs $eval_nItrs --batch_size 1 $model_version_arg
+
 else
     torchrun --standalone --nnodes=1 --nproc-per-node=$nproc \
       run_mistral.py --mode $mode --model $model --model_path $model_path --eval_nItrs $eval_nItrs --batch_size 1 $model_version_arg \

@@ -126,7 +126,7 @@ def measure_generate(
 
 
 @torch.inference_mode()
-def profile_generate(
+def nsys_profile_generate(
     prompts: List[str],
     tokenizer: MistralTokenizer,
     model: Transformer,
@@ -138,7 +138,8 @@ def profile_generate(
     local_rank=None,
     local_work_size=None,
 ):
-
+    torch.cuda.cudart().cudaProfilerStart()
+    torch.cuda.nvtx.range_push(f"{local_rank} - prefill")
     encoded_prompts: List[List[int]] = [
         tokenizer.encode_chat_completion(
             ChatCompletionRequest(messages=[UserMessage(content=p)])
@@ -168,18 +169,18 @@ def profile_generate(
 
     assert all(len(p) > 0 for p in encoded_prompts)
 
-    if not distributed or local_rank == 0:
-        torch.cuda.cudart().cudaProfilerStart()
-        torch.cuda.nvtx.range_push("prefill forward")
-
-    prelogits = model.forward_profile(
+    # if not distributed or local_rank == 0:
+    #     torch.cuda.cudart().cudaProfilerStart()
+    #     torch.cuda.nvtx.range_push("prefill forward")
+    # torch.cuda.nvtx.range_push("prefill forward")
+    prelogits = model.forward(
         torch.tensor(sum(encoded_prompts, []), device=model.device, dtype=torch.long),
         seqlens=[len(p) for p in encoded_prompts],
         cache=cache,
     )
-
-    if not distributed or local_rank == 0:
-        torch.cuda.nvtx.range_pop()
+    # torch.cuda.nvtx.range_pop()
+    # if not distributed or local_rank == 0:
+    #     torch.cuda.nvtx.range_pop()
 
     # if not distributed or local_rank == 0:
     #     torch.cuda.nvtx.range_push("log_softmax")
@@ -213,6 +214,8 @@ def profile_generate(
     is_finished = torch.tensor([False for _ in range(B)])
 
     assert last_token_prelogits is not None
+    torch.cuda.nvtx.range_pop()
+    torch.cuda.nvtx.range_push(f"{local_rank} - decode")
     for _ in range(max_tokens):
 
         # if not distributed or local_rank == 0:
@@ -244,26 +247,130 @@ def profile_generate(
 
         # if not distributed or local_rank == 0:
         #     torch.cuda.nvtx.range_push("decode forward")
-
-        last_token_prelogits = model.forward_profile(
-            next_token, seqlens=[1] * B, cache=cache
-        )
-
+        # torch.cuda.nvtx.range_push("decode forward")
+        last_token_prelogits = model.forward(next_token, seqlens=[1] * B, cache=cache)
+        # torch.cuda.cudart().cudaProfilerStop()
         # if not distributed or local_rank == 0:
         #     torch.cuda.nvtx.range_pop()
 
         assert last_token_prelogits.shape == (B, V)
 
-    if not distributed or local_rank == 0:
-        torch.cuda.cudart().cudaProfilerStop()
+    # if not distributed or local_rank == 0:
+    #     torch.cuda.cudart().cudaProfilerStop()
 
     generated_tokens: List[List[int]]
     if generated_tensors:
         generated_tokens = torch.cat(generated_tensors, 1).tolist()
     else:
         generated_tokens = []
-
+    torch.cuda.nvtx.range_pop()
+    if distributed:
+        dist.barrier()
+    torch.cuda.cudart().cudaProfilerStop()
     return generated_tokens, logprobs
+
+
+@torch.inference_mode()
+def profile_generate(
+    prompts: List[str],
+    tokenizer: MistralTokenizer,
+    model: Transformer,
+    # images: List[List[np.ndarray]] = [],
+    *,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    chunk_size: Optional[int] = None,
+    eos_id: Optional[int] = None,
+    distribued=False,
+    local_rank=None,
+    result_folder: str = "./profile_result_dist",
+) -> Tuple[List[List[int]], List[List[float]]]:
+
+    from tqdm import tqdm
+    from torch.profiler import tensorboard_trace_handler
+
+    trace_handler = tensorboard_trace_handler(dir_name=result_folder)
+
+    encoded_prompts: List[List[int]] = [
+        tokenizer.encode_chat_completion(
+            ChatCompletionRequest(messages=[UserMessage(content=p)])
+        ).tokens
+        for p in prompts
+    ]
+    B, V = len(encoded_prompts), model.args.vocab_size
+    seqlens = [len(x) for x in encoded_prompts]
+
+    # Cache
+    cache_window = max(seqlens) + max_tokens
+    cache = BufferCache(
+        model.n_local_layers,
+        model.args.max_batch_size,
+        cache_window,
+        model.n_kv_heads,
+        model.args.head_dim,
+        model.args.sliding_window,
+    )
+    cache.to(device=model.device, dtype=model.dtype)
+    cache.reset()
+
+    # Bookkeeping
+    logprobs: List[List[float]] = [[] for _ in range(B)]
+    last_token_prelogits = None
+
+    input_ids = sum(encoded_prompts, [])
+
+    prelogits = model.forward(
+        torch.tensor(input_ids, device=model.device, dtype=torch.long),
+        seqlens=seqlens,
+        cache=cache,
+    )
+
+    logits = torch.log_softmax(prelogits, dim=-1)
+
+    offset = 0
+    for i_seq, sequence in enumerate(encoded_prompts):
+        logprobs[i_seq].extend(
+            [
+                logits[offset + i, sequence[i + 1]].item()
+                for i in range(len(sequence) - 1)
+            ]
+        )
+        offset += len(sequence)
+
+    last_token_prelogits = prelogits.index_select(
+        0,
+        torch.tensor([len(p) for p in encoded_prompts], device=prelogits.device).cumsum(
+            dim=0
+        )
+        - 1,
+    )
+
+    assert last_token_prelogits is not None
+    next_token = sample(last_token_prelogits, temperature=temperature, top_p=top_p)
+
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        schedule=torch.profiler.schedule(wait=0, warmup=2, active=max_tokens),
+        on_trace_ready=trace_handler,
+    ) as p:
+        if not distribued or local_rank == 0:
+            for _ in tqdm(range(2 + max_tokens), desc="Profiling Decoding Stage..."):
+                last_token_prelogits = model.forward(
+                    next_token, seqlens=[1] * B, cache=cache
+                )
+                p.step()
+        else:
+            for _ in range(2 + max_tokens):
+                last_token_prelogits = model.forward(
+                    next_token, seqlens=[1] * B, cache=cache
+                )
+                p.step()
+
+    return
 
 
 @torch.inference_mode()

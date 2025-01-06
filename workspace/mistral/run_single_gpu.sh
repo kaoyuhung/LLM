@@ -29,6 +29,15 @@ if [ $mode = "measure" ]; then
     python3 run_mistral.py --mode $mode --model $model --model_path $model_path --eval_nItrs $eval_nItrs --batch_size $N $model_version_arg \
       >> $output_folder/$output_file
   done
+
+elif [ $mode = "nsys_profile" ]; then
+    nsys profile --cudabacktrace=true --capture-range=cudaProfilerApi --capture-range-end=stop --sample=none -f true -o $output_folder/$output_file \
+      python3 run_mistral.py --mode $mode --model $model --model_path $model_path --eval_nItrs $eval_nItrs --batch_size 1 $model_version_arg --max_tokens 5
+
+elif [ $mode = "profile" ]; then
+  python3 run_mistral.py --mode $mode --model $model --model_path $model_path --eval_nItrs $eval_nItrs --batch_size 1 $model_version_arg 
+fi
+
 else
   python3 run_mistral.py --mode $mode --model $model --model_path $model_path --eval_nItrs $eval_nItrs --batch_size 1 $model_version_arg \
     >> $output_folder/$output_file

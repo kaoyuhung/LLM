@@ -5,7 +5,8 @@ ntu_paslab_llm
 workspace/prompts/*_bench
 *weights
 *.nsys-rep
-result*
+result
+profile_result*
 workspace/test
 examples
 test*.py

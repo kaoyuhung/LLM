@@ -8,7 +8,12 @@ import torch.distributed as dist
 from pathlib import Path
 from typing import Optional
 from engine.transformer import Transformer
-from engine.generate import generate, profile_generate, measure_generate
+from engine.generate import (
+    generate,
+    nsys_profile_generate,
+    measure_generate,
+    profile_generate,
+)
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from huggingface_hub import snapshot_download
 from util import setup_seed, load_data
@@ -308,11 +313,11 @@ def run_default(
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
 
-        out_tokens, _ = profile_generate(
+        out_tokens, _ = nsys_profile_generate(
             [prompts[0]],
             tokenizer,
             model,
-            max_tokens=2,
+            max_tokens=max_tokens,
             temperature=T,
             top_p=P,
             eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
@@ -354,31 +359,27 @@ def run_default(
             print("-" * 100)
 
     elif mode == "profile":
-        from torch.profiler import tensorboard_trace_handler
+        for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
+            generate(
+                [prompts[0]],
+                tokenizer,
+                model,
+                max_tokens=max_tokens,
+                temperature=T,
+                top_p=P,
+                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            )
 
-        trace_handler = tensorboard_trace_handler(dir_name="./result_profile")
-
-        with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            schedule=torch.profiler.schedule(wait=0, warmup=warmup_iters, active=2),
-            on_trace_ready=trace_handler,
-        ) as p:
-            for _ in tqdm(range(6), desc="Profiling..."):
-                out_tokens, _ = generate(
-                    [prompts[0]],
-                    tokenizer,
-                    model,
-                    max_tokens=max_tokens,
-                    temperature=T,
-                    top_p=P,
-                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-                )
-                p.step()
-
-            # print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
+        profile_generate(
+            [prompts[0]],
+            tokenizer,
+            model,
+            max_tokens=max_tokens,
+            temperature=T,
+            top_p=P,
+            eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            reuslt_folder=f"./profile_result_default_{model_name}",
+        )
 
 
 def run_dist(
@@ -521,11 +522,11 @@ def run_dist(
                 )
         dist.barrier()
 
-        out_tokens, _ = profile_generate(
+        out_tokens, _ = nsys_profile_generate(
             [prompts[0]],
             tokenizer,
             model,
-            max_tokens=2,
+            max_tokens=max_tokens,
             temperature=T,
             top_p=P,
             eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
@@ -536,42 +537,41 @@ def run_dist(
         dist.barrier()
 
     elif mode == "profile":
-        from torch.profiler import tensorboard_trace_handler
-
-        trace_handler = tensorboard_trace_handler(dir_name="./result_profile")
-
-        with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            schedule=torch.profiler.schedule(wait=0, warmup=warmup_iters, active=2),
-            on_trace_ready=trace_handler,
-        ) as p:
-            if LOCAL_RANK == 0:
-                for _ in tqdm(range(6), desc="Profiling..."):
-                    out_tokens, _ = generate(
-                        [prompts[0]],
-                        tokenizer,
-                        model,
-                        max_tokens=max_tokens,
-                        temperature=T,
-                        top_p=P,
-                        eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-                    )
-                    p.step()
-            else:
-                for _ in range(6):
-                    out_tokens, _ = generate(
-                        [prompts[0]],
-                        tokenizer,
-                        model,
-                        max_tokens=max_tokens,
-                        temperature=T,
-                        top_p=P,
-                        eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-                    )
-                    p.step()
+        if LOCAL_RANK == 0:
+            for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
+                generate(
+                    [prompts[0]],
+                    tokenizer,
+                    model,
+                    max_tokens=max_tokens,
+                    temperature=T,
+                    top_p=P,
+                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                )
+        else:
+            for _ in range(warmup_iters):
+                generate(
+                    [prompts[0]],
+                    tokenizer,
+                    model,
+                    max_tokens=max_tokens,
+                    temperature=T,
+                    top_p=P,
+                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                )
+        dist.barrier()
+        profile_generate(
+            [prompts[0]],
+            tokenizer,
+            model,
+            max_tokens=max_tokens,
+            temperature=T,
+            top_p=P,
+            eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            distribued=True,
+            local_rank=LOCAL_RANK,
+            result_folder=f"./profile_result_dist_{model_name}_{model_version}",
+        )
 
     dist.destroy_process_group()
 
