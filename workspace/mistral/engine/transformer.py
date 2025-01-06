@@ -63,21 +63,23 @@ class Transformer(ModelBase, LoRALoaderMixin):
         self.norm: Optional[RMSNorm] = None
         self.output: Optional[nn.Linear] = None
 
-        if (
-            self.num_pipeline_ranks > 1
-            and self.pipeline_rank != self.num_pipeline_ranks - 1
-        ):
-            if self.num_pipeline_ranks == dist.get_world_size():
-                self.RanksOnNextNode = [self.pipeline_rank + 1]
+        # if (
+        #     self.num_pipeline_ranks > 1
+        #     and self.pipeline_rank != self.num_pipeline_ranks - 1
+        #     and self.tp_rank == self.num_tp_ranks - 1
+        # ):
+        #     # if self.num_pipeline_ranks == dist.get_world_size():
+        #     #     self.RanksOnNextNode = [self.pipeline_rank + 1]
 
-            else:
-                assert n_process_per_node != None
-                self.RanksOnNextNode = [
-                    sum(n_process_per_node[: self.pipeline_rank + 1]) + i
-                    for i in range(n_process_per_node[self.pipeline_rank + 1])
-                ]
-        else:
-            self.RanksOnNextNode = None
+        #     # else:
+        #     #     assert n_process_per_node != None
+        #     #     self.RanksOnNextNode = [
+        #     #         sum(n_process_per_node[: self.pipeline_rank + 1]) + i
+        #     #         for i in range(n_process_per_node[self.pipeline_rank + 1])
+        #     #     ]
+        #     self.RanksOnNextNode = [dist.get_rank() + 1]
+        # else:
+        #     self.RanksOnNextNode = None
 
         # Initialize all layers but slice off those not of this rank.
         if self.num_tp_ranks > 1:
@@ -266,9 +268,14 @@ class Transformer(ModelBase, LoRALoaderMixin):
             h = torch.empty(
                 num_toks, self.args.dim, device=self.device, dtype=self.dtype
             )
-            dist.batch_isend_irecv(
-                [dist.P2POp(dist.irecv, h, dist.get_rank() - self.tp_rank - 1)]
-            )[0].wait()
+            if self.tp_rank == 0:
+                dist.batch_isend_irecv(
+                    [dist.P2POp(dist.irecv, h, dist.get_rank() - 1)]
+                )[0].wait()
+            if self.num_tp_ranks > 1:
+                dist.broadcast(
+                    h, src=dist.get_rank() - self.tp_rank, group=self.tp_group
+                )
 
         input_metadata: List[CacheInputMetadata] | List[SimpleInputMetadata]
         input_metadata = cache.get_input_metadata(seqlens)
@@ -285,11 +292,9 @@ class Transformer(ModelBase, LoRALoaderMixin):
 
         if self.pipeline_rank < self.num_pipeline_ranks - 1:
             if self.tp_rank == self.num_tp_ranks - 1:
-                reqs = dist.batch_isend_irecv(
-                    [dist.P2POp(dist.isend, h, rank) for rank in self.RanksOnNextNode]
-                )
-                for req in reqs:
-                    req.wait()
+                dist.batch_isend_irecv(
+                    [dist.P2POp(dist.isend, h, dist.get_rank() + 1)]
+                )[0].wait()
             return h
         else:
             # Last rank has a final normalization step.
