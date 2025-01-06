@@ -1,47 +1,20 @@
-from functools import partial
-from typing import Optional, Tuple, Type, Union, List
-
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-import dataclasses
 
-from simple_parsing.helpers import Serializable
+from typing import Optional, List
 from torch import nn
 from xformers.ops.fmha import memory_efficient_attention  # type: ignore
 from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
 from mistral_inference.args import LoraArgs
-from engine.transformer_layers import RMSNorm, FeedForward
+from engine.transformer_layers import RMSNorm, FeedForward, repeat_kv, maybe_lora
 from engine.cache import CacheView
-from mistral_inference.lora import LoRALinear
 from mistral_inference.rope import apply_rotary_emb
+from mistral_inference.moe import MoeArgs
 
 
-def repeat_kv(
-    keys: torch.Tensor, values: torch.Tensor, repeats: int, dim: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    keys = torch.repeat_interleave(keys, repeats=repeats, dim=dim)
-    values = torch.repeat_interleave(values, repeats=repeats, dim=dim)
-    return keys, values
-
-
-def maybe_lora(
-    lora_args: Optional[LoraArgs],
-) -> Union[Type[nn.Linear], partial[LoRALinear]]:
-    if lora_args is None:
-        return nn.Linear
-    else:
-        return partial(LoRALinear, rank=lora_args.rank, scaling=lora_args.scaling)
-
-
-@dataclasses.dataclass
-class MoeArgs(Serializable):
-    num_experts: int
-    num_experts_per_tok: int
-
-
-class MoeLayer(nn.Module):
+class MoeLayerTP(nn.Module):
     def __init__(
         self,
         experts: List[nn.Module],
@@ -73,7 +46,7 @@ class MoeLayer(nn.Module):
         return results
 
 
-class Attention(nn.Module):
+class AttentionTP(nn.Module):
     def __init__(
         self,
         dim: int,
@@ -193,7 +166,7 @@ class TransformerBlockTP(nn.Module):
             dim=dim,
             eps=norm_eps,
         )
-        self.attention = Attention(
+        self.attention = AttentionTP(
             dim=dim,
             n_heads=n_heads,
             head_dim=head_dim,
@@ -207,7 +180,7 @@ class TransformerBlockTP(nn.Module):
         )
         self.feed_forward: nn.Module
         if moe is not None:
-            self.feed_forward = MoeLayer(
+            self.feed_forward = MoeLayerTP(
                 experts=[
                     FeedForward(dim=dim, hidden_dim=hidden_dim, lora=lora)
                     for _ in range(moe.num_experts)
