@@ -51,9 +51,6 @@ def getModelandTokenizeer(
                     pipeline_rank=WORLD_RANK,
                     num_pipeline_ranks=WORLD_SIZE,
                     num_tp_ranks=1,
-                    RanksOnNextNode=(
-                        [WORLD_RANK + 1] if WORLD_RANK != WORLD_SIZE - 1 else None
-                    ),
                     device=device,
                     dtype=dtype,
                 )
@@ -78,31 +75,14 @@ def getModelandTokenizeer(
                     torch.tensor([NODE_RANK], dtype=torch.int, device=device),
                 )
 
-                num_pp_ranks = len(gather_tensor.unique().tolist())
+                n_process_per_node = torch.unique(gather_tensor, return_counts=True)[
+                    1
+                ].tolist()
+                num_pp_ranks = len(n_process_per_node)
                 assert num_pp_ranks > 1
                 num_tp_ranks = (gather_tensor == NODE_RANK).sum().item()
                 RanksOnSameNode = torch.where(gather_tensor == NODE_RANK)[0].tolist()
-                RanksOnNextNode = (
-                    torch.where(gather_tensor == NODE_RANK + 1)[0].tolist()
-                    if NODE_RANK != num_pp_ranks - 1
-                    else None
-                )
                 tp_rank = WORLD_RANK - RanksOnSameNode[0]
-                # for i in range(WORLD_SIZE):
-                #     if i == WORLD_RANK:
-                #         print(
-                #             i,
-                #             NODE_RANK,
-                #             num_pp_ranks,
-                #             num_tp_ranks,
-                #             RanksOnSameNode,
-                #             tp_rank,
-                #             RanksOnNextNode,
-                #         )
-                #     dist.barrier()
-                # dist.destroy_process_group()
-                # exit()
-                
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
                     max_batch_size=max_batch_size,
@@ -111,7 +91,7 @@ def getModelandTokenizeer(
                     tp_rank=tp_rank,
                     num_tp_ranks=num_tp_ranks,
                     tp_gorup=dist.new_group(ranks=RanksOnSameNode, backend="nccl"),
-                    RanksOnNextNode=RanksOnNextNode,
+                    n_process_per_node=n_process_per_node,
                     device=device,
                     dtype=dtype,
                 )
@@ -139,6 +119,33 @@ def getModelandTokenizeer(
                     tp_gorup=dist.new_group(
                         ranks=list(range(WORLD_SIZE)), backend="nccl"
                     ),
+                    device=device,
+                    dtype=dtype,
+                )
+            elif model_version == "PP+TP":
+                gather_tensor = torch.empty(WORLD_SIZE, dtype=torch.int, device=device)
+                dist.all_gather_into_tensor(
+                    gather_tensor,
+                    torch.tensor([NODE_RANK], dtype=torch.int, device=device),
+                )
+
+                n_process_per_node = torch.unique(gather_tensor, return_counts=True)[
+                    1
+                ].tolist()
+                num_pp_ranks = len(n_process_per_node)
+                assert num_pp_ranks > 1
+                num_tp_ranks = (gather_tensor == NODE_RANK).sum().item()
+                RanksOnSameNode = torch.where(gather_tensor == NODE_RANK)[0].tolist()
+                tp_rank = WORLD_RANK - RanksOnSameNode[0]
+                model = Transformer.from_folder(
+                    folder=mistral_models_path,
+                    max_batch_size=max_batch_size,
+                    pipeline_rank=NODE_RANK,
+                    num_pipeline_ranks=num_pp_ranks,
+                    tp_rank=tp_rank,
+                    num_tp_ranks=num_tp_ranks,
+                    tp_gorup=dist.new_group(ranks=RanksOnSameNode, backend="nccl"),
+                    n_process_per_node=n_process_per_node,
                     device=device,
                     dtype=dtype,
                 )
@@ -191,6 +198,35 @@ def getModelandTokenizeer(
                         max_batch_size,
                     )
 
+                elif model_version == "v4":
+                    gather_tensor = torch.empty(
+                        WORLD_SIZE, dtype=torch.int, device=device
+                    )
+                    dist.all_gather_into_tensor(
+                        gather_tensor,
+                        torch.tensor([NODE_RANK], dtype=torch.int, device=device),
+                    )
+
+                    n_process_per_node = torch.unique(
+                        gather_tensor, return_counts=True
+                    )[1].tolist()
+                    num_pp_ranks = len(n_process_per_node)
+                    assert num_pp_ranks > 1
+                    num_tp_ranks = (gather_tensor == NODE_RANK).sum().item()
+                    RanksOnSameNode = torch.where(gather_tensor == NODE_RANK)[
+                        0
+                    ].tolist()
+                    from engine.mixtral_8x7b_v4 import TransformerV4
+
+                    model = TransformerV4.load(
+                        model_path=Path(mistral_models_path),
+                        node_id=NODE_RANK,
+                        gpu=device,
+                        group=dist.new_group(ranks=RanksOnSameNode, backend="nccl"),
+                        is_first_node=(NODE_RANK == 0),
+                        is_last_node=(NODE_RANK == 1),
+                        max_batch_size=max_batch_size,
+                    )
     else:
         if model_name == "Mistral-7B-Instruct-v0.3":
             tokenizer = MistralTokenizer.from_file(
@@ -591,7 +627,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_version",
         type=str,
-        choices=["v0", "v1", "v2", "v3", "PP", "TP", "PP+TP"],
+        choices=["v0", "v1", "v2", "v3", "v4", "PP", "TP", "PP+TP"],
     )
     args = parser.parse_args()
 

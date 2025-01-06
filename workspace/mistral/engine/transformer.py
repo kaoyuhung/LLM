@@ -41,7 +41,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
         tp_rank: int = 0,
         num_tp_ranks: int = 1,
         tp_group: dist.distributed_c10d.ProcessGroup = None,
-        RanksOnNextNode: list = None,
+        n_process_per_node: list = None,
         softmax_fp32: bool = True,
     ):
         super().__init__()
@@ -56,7 +56,6 @@ class Transformer(ModelBase, LoRALoaderMixin):
         self.tp_rank = tp_rank
         self.num_tp_ranks = num_tp_ranks
         self.tp_group = tp_group
-        self.RanksOnNextNode = RanksOnNextNode
         self.softmax_fp32 = softmax_fp32
 
         # Modules specific to some ranks:
@@ -68,7 +67,17 @@ class Transformer(ModelBase, LoRALoaderMixin):
             self.num_pipeline_ranks > 1
             and self.pipeline_rank != self.num_pipeline_ranks - 1
         ):
-            assert self.RanksOnNextNode != None
+            if self.num_pipeline_ranks == dist.get_world_size():
+                self.RanksOnNextNode = [self.pipeline_rank + 1]
+
+            else:
+                assert n_process_per_node != None
+                self.RanksOnNextNode = [
+                    sum(n_process_per_node[: self.pipeline_rank + 1]) + i
+                    for i in range(n_process_per_node[self.pipeline_rank + 1])
+                ]
+        else:
+            self.RanksOnNextNode = None
 
         # Initialize all layers but slice off those not of this rank.
         if self.num_tp_ranks > 1:
@@ -157,16 +166,29 @@ class Transformer(ModelBase, LoRALoaderMixin):
         # offset = self.pipeline_rank * num_layers_per_rank
         # end = min(self.n_layers, offset + num_layers_per_rank)
 
-        num_layers_per_rank = self.n_layers // self.num_pipeline_ranks
-        remainder = self.n_layers % self.num_pipeline_ranks
-        if self.num_pipeline_ranks - self.pipeline_rank <= remainder:
-            offset = self.pipeline_rank * num_layers_per_rank + (
-                remainder - (self.num_pipeline_ranks - self.pipeline_rank)
-            )
-            end = offset + num_layers_per_rank + 1
-        else:
-            offset = self.pipeline_rank * num_layers_per_rank
-            end = offset + num_layers_per_rank
+        if (
+            self.num_pipeline_ranks == 1
+            or self.num_pipeline_ranks == dist.get_world_size()
+        ):
+            num_layers_per_rank = self.n_layers // self.num_pipeline_ranks
+            remainder = self.n_layers % self.num_pipeline_ranks
+            if self.num_pipeline_ranks - self.pipeline_rank <= remainder:
+                offset = self.pipeline_rank * num_layers_per_rank + (
+                    remainder - (self.num_pipeline_ranks - self.pipeline_rank)
+                )
+                end = offset + num_layers_per_rank + 1
+            else:
+                offset = self.pipeline_rank * num_layers_per_rank
+                end = offset + num_layers_per_rank
+        else:  # "PP + ?P"
+            n_process = sum(n_process_per_node)
+            n_layers_per_node = [
+                round(n / n_process * self.n_layers) for n in n_process_per_node
+            ]
+            for i in range(n_process - sum(n_layers_per_node)):
+                n_layers_per_node[-i - 1] += 1
+            offset = sum(n_layers_per_node[: self.pipeline_rank])
+            end = offset + n_layers_per_node[self.pipeline_rank]
 
         if pipeline_rank == 0:
             self.tok_embeddings = nn.Embedding(
@@ -228,25 +250,19 @@ class Transformer(ModelBase, LoRALoaderMixin):
         # ), f"Max batch size is {self.args.max_batch_size}, got batch size of {len(seqlens)}"
         # assert sum(seqlens) == num_toks, (sum(seqlens), num_toks)
         if self.pipeline_rank == 0:
-            print(dist.get_rank(), "check1")
-            dist.barrier()
-            dist.destroy_process_group()
-            exit()
             if self.num_tp_ranks > 1:
                 gather_list = [
                     torch.empty(num_toks, tp_dim, device=self.device, dtype=self.dtype)
                     for tp_dim, _ in self.tp_dim_off_list
                 ]
-                dist.all_gather(gather_list, self.tok_embeddings(input_ids))
+                dist.all_gather(
+                    gather_list, self.tok_embeddings(input_ids), group=self.tp_group
+                )
                 h = torch.cat(gather_list, dim=1)
             else:
                 h = self.tok_embeddings(input_ids)
 
         else:
-            print(dist.get_rank(), "check2")
-            dist.barrier()
-            dist.destroy_process_group()
-            exit()
             h = torch.empty(
                 num_toks, self.args.dim, device=self.device, dtype=self.dtype
             )
@@ -298,7 +314,8 @@ class Transformer(ModelBase, LoRALoaderMixin):
             outs = self.output(h)
 
         if self.num_pipeline_ranks > 1:
-            dist.broadcast(outs, src=self.num_pipeline_ranks - 1)
+            # dist.broadcast(outs, src=self.num_pipeline_ranks - 1)
+            dist.broadcast(outs, src=dist.get_world_size() - 1)
 
         if self.softmax_fp32:
             return outs.float()
@@ -399,7 +416,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
         tp_rank: int = 0,
         num_tp_ranks: int = 1,
         tp_gorup: dist.distributed_c10d.ProcessGroup = None,
-        RanksOnNextNode: list = None,
+        n_process_per_node: list = None,
         device: Union[torch.device, str] = "cuda",
         dtype: Optional[torch.dtype] = None,
         softmax_fp32: bool = True,
@@ -436,7 +453,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 tp_rank=tp_rank,
                 num_tp_ranks=num_tp_ranks,
                 tp_group=tp_gorup,
-                RanksOnNextNode=RanksOnNextNode,
+                n_process_per_node=n_process_per_node,
                 softmax_fp32=softmax_fp32,
             )
 
