@@ -73,22 +73,6 @@ class Transformer(ModelBase, LoRALoaderMixin):
         if self.num_tp_ranks > 1:
             assert self.tp_group != None
 
-            remainder = args.dim % self.num_tp_ranks
-            tp_dim = args.dim // self.num_tp_ranks
-            self.tp_dim_off_list = []
-            for rank in range(self.num_tp_ranks):
-                tp_dim_off = rank * tp_dim
-                if self.num_tp_ranks - rank <= remainder:
-                    self.tp_dim_off_list.append(
-                        (
-                            tp_dim + 1,
-                            tp_dim_off + remainder - (self.num_tp_ranks - rank),
-                        )
-                    )
-                else:
-                    self.tp_dim_off_list.append((tp_dim, tp_dim_off))
-            self.tp_dim, self.tp_dim_off = self.tp_dim_off_list[self.tp_rank]
-
             remainder = args.hidden_dim % self.num_tp_ranks
             self.tp_hidden_dim = args.hidden_dim // self.num_tp_ranks
             self.tp_hidden_dim_off = self.tp_rank * self.tp_hidden_dim
@@ -247,9 +231,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
             end = offset + n_layers_per_node[self.pipeline_rank]
 
         if pipeline_rank == 0:
-            self.tok_embeddings = nn.Embedding(
-                args.vocab_size, args.dim if self.num_tp_ranks == 1 else self.tp_dim
-            )  # (32000, 4096)
+            self.tok_embeddings = nn.Embedding(args.vocab_size, args.dim)
 
         self.layers = nn.ModuleDict({str(i): layers[i] for i in range(offset, end)})
         self.n_local_layers = len(self.layers)
@@ -306,17 +288,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
         # ), f"Max batch size is {self.args.max_batch_size}, got batch size of {len(seqlens)}"
         # assert sum(seqlens) == num_toks, (sum(seqlens), num_toks)
         if self.pipeline_rank == 0:
-            if self.num_tp_ranks > 1:
-                gather_list = [
-                    torch.empty(num_toks, tp_dim, device=self.device, dtype=self.dtype)
-                    for tp_dim, _ in self.tp_dim_off_list
-                ]
-                dist.all_gather(
-                    gather_list, self.tok_embeddings(input_ids), group=self.tp_group
-                )
-                h = torch.cat(gather_list, dim=1)
-            else:
-                h = self.tok_embeddings(input_ids)
+            h = self.tok_embeddings(input_ids)
 
         else:
             h = torch.empty(
@@ -389,8 +361,6 @@ class Transformer(ModelBase, LoRALoaderMixin):
         for k, v in state_dict.items():
             if k.startswith("tok_embeddings"):
                 if self.pipeline_rank == 0:
-                    if self.num_tp_ranks > 1:
-                        v = v[:, self.tp_dim_off : self.tp_dim_off + self.tp_dim]
                     state_to_load[k] = v
                 else:
                     logging.debug(
