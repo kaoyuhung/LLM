@@ -114,6 +114,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 if self.num_ep_ranks == args.moe.num_experts:
                     self.n_expert = args.moe.num_experts // self.num_ep_ranks
                     self.expert_off = self.ep_rank * self.n_expert
+                    self.ep_hidden_dim = args.hidden_dim
 
                 else:
                     assert n_process_per_node != None
@@ -129,9 +130,28 @@ class Transformer(ModelBase, LoRALoaderMixin):
                     self.n_expert = n_expert_per_node[self.ep_rank]
                     self.expert_off = sum(n_expert_per_node[: self.ep_rank])
 
+                    local_rank = dist.get_rank() - sum(
+                        n_process_per_node[: self.ep_rank]
+                    )
+                    local_world_size = n_process_per_node[self.ep_rank]
+                    remainder = args.hidden_dim % local_world_size
+                    self.ep_hidden_dim = args.hidden_dim // local_world_size
+                    self.ep_hidden_dim_off = local_rank * self.ep_hidden_dim
+                    if local_world_size - local_rank <= remainder:
+                        self.ep_hidden_dim += 1
+                        self.ep_hidden_dim_off += remainder - (
+                            local_world_size - local_rank
+                        )
+
                 # for i in range(dist.get_world_size()):
                 #     if i == dist.get_rank():
-                #         print(i, self.expert_off, self.n_expert, n_process_per_node)
+                #         print(
+                #             i,
+                #             self.expert_off,
+                #             self.n_expert,
+                #             self.ep_hidden_dim_off,
+                #             self.ep_hidden_dim,
+                #         )
                 #     dist.barrier()
                 # dist.destroy_process_group()
                 # exit()
@@ -139,7 +159,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 layers = [
                     TransformerBlockEP(
                         dim=args.dim,
-                        hidden_dim=args.hidden_dim,
+                        hidden_dim=self.ep_hidden_dim,
                         n_heads=self.n_heads,
                         n_kv_heads=self.n_kv_heads,
                         head_dim=args.head_dim,
@@ -398,19 +418,19 @@ class Transformer(ModelBase, LoRALoaderMixin):
                         and expert_id < self.expert_off + self.n_expert
                     ):
                         if (
-                            self.num_ep_ranks != dist.get_world_size()
+                            self.num_ep_ranks < self.args.moe.num_experts
                         ):  # intra-node TP and inter-node EP
                             if k.endswith("w1.weight") or k.endswith("w3.weight"):
                                 v = v[
-                                    self.tp_hidden_dim_off : self.tp_hidden_dim_off
-                                    + self.tp_hidden_dim,
+                                    self.ep_hidden_dim_off : self.ep_hidden_dim_off
+                                    + self.ep_hidden_dim,
                                     :,
                                 ]
                             elif k.endswith("w2.weight"):
                                 v = v[
                                     :,
-                                    self.tp_hidden_dim_off : self.tp_hidden_dim_off
-                                    + self.tp_hidden_dim,
+                                    self.ep_hidden_dim_off : self.ep_hidden_dim_off
+                                    + self.ep_hidden_dim,
                                 ]
                         state_to_load[k] = v
                     else:

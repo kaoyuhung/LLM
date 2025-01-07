@@ -85,16 +85,14 @@ def getModelandTokenizeer(
                 ].tolist()
                 num_pp_ranks = len(n_process_per_node)
                 assert num_pp_ranks > 1
-                num_tp_ranks = (gather_tensor == NODE_RANK).sum().item()
                 RanksOnSameNode = torch.where(gather_tensor == NODE_RANK)[0].tolist()
-                tp_rank = WORLD_RANK - RanksOnSameNode[0]
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
                     max_batch_size=max_batch_size,
                     pipeline_rank=NODE_RANK,
                     num_pipeline_ranks=num_pp_ranks,
-                    tp_rank=tp_rank,
-                    num_tp_ranks=num_tp_ranks,
+                    tp_rank=LOCAL_RANK,
+                    num_tp_ranks=LOCAL_WORLD_SIZE,
                     tp_gorup=dist.new_group(ranks=RanksOnSameNode, backend="nccl"),
                     n_process_per_node=n_process_per_node,
                     device=device,
