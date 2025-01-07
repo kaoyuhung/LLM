@@ -169,6 +169,32 @@ def getModelandTokenizeer(
                     device=device,
                     dtype=dtype,
                 )
+            elif model_version == "PP+EP":
+                gather_tensor = torch.empty(WORLD_SIZE, dtype=torch.int, device=device)
+                dist.all_gather_into_tensor(
+                    gather_tensor,
+                    torch.tensor([NODE_RANK], dtype=torch.int, device=device),
+                )
+                n_process_per_node = torch.unique(gather_tensor, return_counts=True)[
+                    1
+                ].tolist()
+                num_pp_ranks = len(n_process_per_node)
+                assert num_pp_ranks > 1
+                RanksOnSameNode = torch.where(gather_tensor == NODE_RANK)[0].tolist()
+                model = Transformer.from_folder(
+                    folder=mistral_models_path,
+                    max_batch_size=max_batch_size,
+                    pipeline_rank=NODE_RANK,
+                    num_pipeline_ranks=num_pp_ranks,
+                    tp_rank=LOCAL_RANK,
+                    num_tp_ranks=LOCAL_WORLD_SIZE,
+                    tp_gorup=dist.new_group(ranks=RanksOnSameNode, backend="nccl"),
+                    n_process_per_node=n_process_per_node,
+                    ep_rank=LOCAL_RANK,
+                    num_ep_ranks=LOCAL_WORLD_SIZE,
+                    device=device,
+                    dtype=dtype,
+                )
 
             else:
                 global_group = dist.new_group(
@@ -333,7 +359,7 @@ def run_default(
             [prompts[0]],
             tokenizer,
             model,
-            max_tokens=max_tokens,
+            max_tokens=5,
             temperature=T,
             top_p=P,
             eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
@@ -643,7 +669,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_version",
         type=str,
-        choices=["v0", "v1", "v2", "v3", "v4", "PP", "TP", "PP+TP", "EP"],
+        choices=["v0", "v1", "v2", "v3", "v4", "PP", "TP", "PP+TP", "EP", "PP+EP"],
     )
     args = parser.parse_args()
 

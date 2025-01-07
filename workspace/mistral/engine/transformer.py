@@ -95,7 +95,10 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 ) * n_head_per_group
 
             if self.num_ep_ranks:
-                if self.num_ep_ranks == args.moe.num_experts:
+                if (
+                    self.num_pipeline_ranks > 1
+                    or self.num_ep_ranks == args.moe.num_experts
+                ):
                     self.n_expert = args.moe.num_experts // self.num_ep_ranks
                     self.expert_off = self.ep_rank * self.n_expert
                     self.ep_hidden_dim = args.hidden_dim
@@ -129,13 +132,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
 
                 # for i in range(dist.get_world_size()):
                 #     if i == dist.get_rank():
-                #         print(
-                #             i,
-                #             self.expert_off,
-                #             self.n_expert,
-                #             self.ep_hidden_dim_off,
-                #             self.ep_hidden_dim,
-                #         )
+                #         print(i, self.expert_off, self.n_expert, self.ep_hidden_dim)
                 #     dist.barrier()
                 # dist.destroy_process_group()
                 # exit()
@@ -192,19 +189,6 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 for _ in range(args.n_layers)
             ]
 
-        # num_layers_per_rank = math.ceil(self.n_layers / self.num_pipeline_ranks)
-        # if self.n_layers % self.num_pipeline_ranks != 0:
-        #     if self.pipeline_rank == 0:
-        #         offset = 0
-        #         num_layers_per_rank -= 1
-        #     else:
-        #         offset = self.pipeline_rank * num_layers_per_rank - 1
-        #     if self.pipeline_rank == self.num_pipeline_ranks - 1:
-        #         num_layers_per_rank += 1
-        # else:
-        # offset = self.pipeline_rank * num_layers_per_rank
-        # end = min(self.n_layers, offset + num_layers_per_rank)
-
         if (
             self.num_pipeline_ranks == 1
             or self.num_pipeline_ranks == dist.get_world_size()
@@ -219,7 +203,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
             else:
                 offset = self.pipeline_rank * num_layers_per_rank
                 end = offset + num_layers_per_rank
-        else:  # "PP + ?P"
+        else:  # "PP + TP/EP"
             assert n_process_per_node != None
             n_process = sum(n_process_per_node)
             n_layers_per_node = [
@@ -229,6 +213,13 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 n_layers_per_node[-i - 1] += 1
             offset = sum(n_layers_per_node[: self.pipeline_rank])
             end = offset + n_layers_per_node[self.pipeline_rank]
+
+        # for i in range(dist.get_world_size()):
+        #     if i == dist.get_rank():
+        #         print(i, offset, end)
+        #     dist.barrier()
+        # dist.destroy_process_group()
+        # exit()
 
         if pipeline_rank == 0:
             self.tok_embeddings = nn.Embedding(args.vocab_size, args.dim)
@@ -341,7 +332,6 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 h.shape[0], self.vocab_size, device=h.device, dtype=h.dtype
             )
         else:
-            assert self.output is not None
             outs = self.output(h)
 
         if self.num_pipeline_ranks > 1:
@@ -381,37 +371,38 @@ class Transformer(ModelBase, LoRALoaderMixin):
                     skipped.add(k)
             elif k.startswith("layers"):
                 layer_id = k.split(".")[1]
-                if "experts" in k and self.num_ep_ranks:
-                    expert_id = int(k.split(".")[4])
-                    if (
-                        self.expert_off <= expert_id
-                        and expert_id < self.expert_off + self.n_expert
-                    ):
+                if layer_id in self.layers:
+                    if "experts" in k and self.num_ep_ranks:
+                        expert_id = int(k.split(".")[4])
                         if (
-                            self.num_ep_ranks < self.args.moe.num_experts
-                        ):  # intra-node TP and inter-node EP
-                            if k.endswith("w1.weight") or k.endswith("w3.weight"):
-                                v = v[
-                                    self.ep_hidden_dim_off : self.ep_hidden_dim_off
-                                    + self.ep_hidden_dim,
-                                    :,
-                                ]
-                            elif k.endswith("w2.weight"):
-                                v = v[
-                                    :,
-                                    self.ep_hidden_dim_off : self.ep_hidden_dim_off
-                                    + self.ep_hidden_dim,
-                                ]
-                        state_to_load[k] = v
+                            self.expert_off <= expert_id
+                            and expert_id < self.expert_off + self.n_expert
+                        ):
+                            if (
+                                self.num_pipeline_ranks == 1
+                                and self.num_ep_ranks < self.args.moe.num_experts
+                            ):  # intra-node TP and inter-node EP
+                                if k.endswith("w1.weight") or k.endswith("w3.weight"):
+                                    v = v[
+                                        self.ep_hidden_dim_off : self.ep_hidden_dim_off
+                                        + self.ep_hidden_dim,
+                                        :,
+                                    ]
+                                elif k.endswith("w2.weight"):
+                                    v = v[
+                                        :,
+                                        self.ep_hidden_dim_off : self.ep_hidden_dim_off
+                                        + self.ep_hidden_dim,
+                                    ]
+                            state_to_load[k] = v
+                        else:
+                            logging.debug(
+                                "Skipping parameter %s at ep rank %d",
+                                k,
+                                self.ep_rank,
+                            )
+                            skipped.add(k)
                     else:
-                        logging.debug(
-                            "Skipping parameter %s at ep rank %d",
-                            k,
-                            self.ep_rank,
-                        )
-                        skipped.add(k)
-                else:
-                    if layer_id in self.layers:
                         if self.num_tp_ranks > 1:
                             if k.endswith("w1.weight") or k.endswith("w3.weight"):
                                 v = v[
@@ -453,13 +444,13 @@ class Transformer(ModelBase, LoRALoaderMixin):
                                     * self.args.head_dim,
                                 ]
                         state_to_load[k] = v
-                    else:
-                        logging.debug(
-                            "Skipping parameter %s at pipeline rank %d",
-                            k,
-                            self.pipeline_rank,
-                        )
-                        skipped.add(k)
+                else:
+                    logging.debug(
+                        "Skipping parameter %s at pipeline rank %d",
+                        k,
+                        self.pipeline_rank,
+                    )
+                    skipped.add(k)
             elif k.startswith("vision_encoder") or k.startswith(
                 "vision_language_adapter"
             ):
@@ -514,20 +505,19 @@ class Transformer(ModelBase, LoRALoaderMixin):
             assert model_args.moe != None
             assert ep_rank < num_ep_ranks
             assert num_ep_ranks <= model_args.moe.num_experts
-            assert num_tp_ranks == dist.get_world_size()
+            assert num_pipeline_ranks > 1 or num_tp_ranks == dist.get_world_size()
 
-            if num_ep_ranks < model_args.moe.num_experts:
-                if n_process_per_node == None:
-                    gather_tensor = torch.empty(
-                        dist.get_world_size(), dtype=torch.int, device=device
-                    )
-                    dist.all_gather_into_tensor(
-                        gather_tensor,
-                        torch.tensor([node_rank], dtype=torch.int, device=device),
-                    )
-                    n_process_per_node = torch.unique(
-                        gather_tensor, return_counts=True
-                    )[1].tolist()
+            if num_pipeline_ranks == 1 and num_ep_ranks < model_args.moe.num_experts:
+                gather_tensor = torch.empty(
+                    dist.get_world_size(), dtype=torch.int, device=device
+                )
+                dist.all_gather_into_tensor(
+                    gather_tensor,
+                    torch.tensor([node_rank], dtype=torch.int, device=device),
+                )
+                n_process_per_node = torch.unique(gather_tensor, return_counts=True)[
+                    1
+                ].tolist()
                 ep_rank, acc = None, 0
                 for i, n_proc in enumerate(n_process_per_node):
                     acc += n_proc

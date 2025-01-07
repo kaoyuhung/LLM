@@ -65,19 +65,19 @@ def test_inter_node():
 
             if i == WORLD_RANK:
                 t = time.time()
-                for _ in range(10):
+                for _ in range(3):
                     dist.batch_isend_irecv([dist.P2POp(dist.isend, tensor, j)])[
                         0
                     ].wait()
                 torch.cuda.synchronize(device)
-                elapsed_time = ((time.time() - t) / 10) * 1000
+                elapsed_time = ((time.time() - t) / 3) * 1000
                 throughput = memory_size_in_bytes / (elapsed_time / 1000) / 1024
                 print(
                     f"Memcpy from GPU{i} to GPU{j}: Lantency={elapsed_time:.4f} ms, Throughput={throughput:.4f} GB/s"
                 )
 
             if j == WORLD_RANK:
-                for _ in range(10):
+                for _ in range(3):
                     dist.batch_isend_irecv([dist.P2POp(dist.irecv, tensor, i)])[
                         0
                     ].wait()
