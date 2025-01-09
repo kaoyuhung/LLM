@@ -80,7 +80,6 @@ def measure_generate(
     generated_tensors = []
     is_finished = torch.tensor([False for _ in range(B)])
 
-    torch.cuda.synchronize(model.device)
     if distribued:
         dist.barrier()
     t1 = time.time()
@@ -111,7 +110,6 @@ def measure_generate(
     else:
         generated_tokens = []
 
-    torch.cuda.synchronize(model.device)
     if distribued:
         dist.barrier()
     t2 = time.time()

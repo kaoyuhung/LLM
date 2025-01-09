@@ -393,7 +393,7 @@ def run_default(
                     eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
                 )
             )
-            n_decode_token = len(sum(out_tokens, []))
+            n_decode_token = len(sum(out_tokens, [])) - batch_size
             print(f"evalItr{i} (batch_size={batch_size})")
             print(
                 f"Prefill time: {prefill_time:.2f} ms, Decode time: {(decode_time):.2f} ms, Prefill throughput: {n_prefill_token/prefill_time:.2f} tokens/s, Decode throughtput: {(n_decode_token/decode_time):.2f} tokens/s"
@@ -528,7 +528,7 @@ def run_dist(
                     eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
                 )
             )
-            n_decode_token = len(sum(out_tokens, []))
+            n_decode_token = len(sum(out_tokens, [])) - batch_size
 
             if LOCAL_RANK == 0:
                 print(f"evalItr{i} (batch_size={batch_size})")
