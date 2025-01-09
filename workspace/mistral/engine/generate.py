@@ -41,7 +41,7 @@ def measure_generate(
         cache_window,
         model.n_kv_heads,
         model.args.head_dim,
-        model.args.sliding_window,
+        # model.args.sliding_window
     )
     cache.to(device=model.device, dtype=model.dtype)
     cache.reset()
@@ -137,6 +137,8 @@ def nsys_profile_generate(
     local_work_size=None,
 ):
     torch.cuda.cudart().cudaProfilerStart()
+    if distributed:
+        dist.barrier()
     torch.cuda.nvtx.range_push(f"{local_rank} - prefill")
     encoded_prompts: List[List[int]] = [
         tokenizer.encode_chat_completion(
@@ -156,7 +158,7 @@ def nsys_profile_generate(
         cache_window,
         model.n_kv_heads,
         model.args.head_dim,
-        model.args.sliding_window,
+        # model.args.sliding_window
     )
     cache.to(device=model.device, dtype=model.dtype)
     cache.reset()
@@ -166,13 +168,13 @@ def nsys_profile_generate(
     last_token_prelogits = None
 
     assert all(len(p) > 0 for p in encoded_prompts)
-
+    torch.cuda.nvtx.range_push(f"{local_rank} - prefill forward")
     prelogits = model.forward(
         torch.tensor(sum(encoded_prompts, []), device=model.device, dtype=torch.long),
         seqlens=[len(p) for p in encoded_prompts],
         cache=cache,
     )
-
+    torch.cuda.nvtx.range_pop()
     logits = torch.log_softmax(prelogits, dim=-1)
 
     offset = 0
@@ -218,7 +220,9 @@ def nsys_profile_generate(
 
         generated_tensors.append(next_token[:, None])
 
+        torch.cuda.nvtx.range_push(f"{local_rank} - decode forward")
         last_token_prelogits = model.forward(next_token, seqlens=[1] * B, cache=cache)
+        torch.cuda.nvtx.range_pop()
 
         assert last_token_prelogits.shape == (B, V)
 
@@ -273,7 +277,7 @@ def profile_generate(
         cache_window,
         model.n_kv_heads,
         model.args.head_dim,
-        model.args.sliding_window,
+        # model.args.sliding_window
     )
     cache.to(device=model.device, dtype=model.dtype)
     cache.reset()
@@ -378,7 +382,7 @@ def generate(
         cache_window,
         model.n_kv_heads,
         model.args.head_dim,
-        model.args.sliding_window,
+        # model.args.sliding_window
     )
     cache.to(device=model.device, dtype=model.dtype)
     cache.reset()

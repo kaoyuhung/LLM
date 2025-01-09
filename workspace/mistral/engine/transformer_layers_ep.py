@@ -43,9 +43,10 @@ class MoeLayerEP(nn.Module):
         results = torch.zeros_like(inputs)
         for i, expert in enumerate(self.experts.values(), start=self.expert_off):
             batch_idx, nth_expert = torch.where(selected_experts == i)
-            results[batch_idx] += weights[batch_idx, nth_expert, None] * expert(
-                inputs[batch_idx]
-            )
+            if batch_idx.numel() != 0:
+                results[batch_idx] += weights[batch_idx, nth_expert, None] * expert(
+                    inputs[batch_idx]
+                )
         dist.all_reduce(results, op=dist.ReduceOp.SUM, group=self.node_group)
         return results
 

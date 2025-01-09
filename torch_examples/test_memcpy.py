@@ -14,6 +14,9 @@ def test_intra_node():
     for i in range(0, torch.cuda.device_count()):
         device = torch.device(f"cuda:{i}")
 
+        for _ in range(3):  # warm-up
+            gpu_tensor = tensor.to(device)
+
         start_event.record()
         for _ in range(5):
             gpu_tensor = tensor.to(device)
@@ -29,6 +32,10 @@ def test_intra_node():
             if i == j:
                 continue
             device = torch.device(f"cuda:{j}")
+
+            for _ in range(3):
+                gpu_tensor.to(device)
+
             start_event.record()
             for _ in range(5):
                 gpu_tensor.to(device)
@@ -64,6 +71,7 @@ def test_inter_node():
                 continue
 
             if i == WORLD_RANK:
+                dist.batch_isend_irecv([dist.P2POp(dist.isend, tensor, j)])[0].wait()
                 t = time.time()
                 for _ in range(3):
                     dist.batch_isend_irecv([dist.P2POp(dist.isend, tensor, j)])[
@@ -77,7 +85,7 @@ def test_inter_node():
                 )
 
             if j == WORLD_RANK:
-                for _ in range(3):
+                for _ in range(4):
                     dist.batch_isend_irecv([dist.P2POp(dist.irecv, tensor, i)])[
                         0
                     ].wait()

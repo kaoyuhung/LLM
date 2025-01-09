@@ -523,12 +523,11 @@ class TransformerV0(nn.Module):
         (num_toks,) = input_ids.shape
         assert sum(seqlens) == num_toks, (sum(seqlens), num_toks)
 
-        input_metadata = cache.get_input_metadata(seqlens)
+        cache_metadata = cache.get_input_metadata(seqlens)
         h = self.tok_embeddings(input_ids)
-        freqs_cis = self.freqs_cis[input_metadata[0].positions]
+        freqs_cis = self.freqs_cis[cache_metadata.positions]
 
         for li in range(self.args.n_layers):
-            cache_metadata = input_metadata[li]
             cache_view = cache.get_view(li, cache_metadata)
             h = self.layers[str(li)](h, freqs_cis, cache_view)
 

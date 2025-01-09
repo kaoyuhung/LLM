@@ -234,46 +234,6 @@ def getModelandTokenizeer(
                         max_batch_size,
                     )
 
-                elif model_version == "v3":
-                    from engine.mixtral_8x7b_v3 import TransformerV3
-
-                    model = TransformerV3.load(
-                        Path(mistral_models_path),
-                        NODE_RANK,
-                        device,
-                        global_group,
-                        max_batch_size,
-                    )
-
-                elif model_version == "v4":
-                    gather_tensor = torch.empty(
-                        WORLD_SIZE, dtype=torch.int, device=device
-                    )
-                    dist.all_gather_into_tensor(
-                        gather_tensor,
-                        torch.tensor([NODE_RANK], dtype=torch.int, device=device),
-                    )
-
-                    n_process_per_node = torch.unique(
-                        gather_tensor, return_counts=True
-                    )[1].tolist()
-                    num_pp_ranks = len(n_process_per_node)
-                    assert num_pp_ranks > 1
-                    num_tp_ranks = (gather_tensor == NODE_RANK).sum().item()
-                    RanksOnSameNode = torch.where(gather_tensor == NODE_RANK)[
-                        0
-                    ].tolist()
-                    from engine.mixtral_8x7b_v4 import TransformerV4
-
-                    model = TransformerV4.load(
-                        model_path=Path(mistral_models_path),
-                        node_id=NODE_RANK,
-                        gpu=device,
-                        group=dist.new_group(ranks=RanksOnSameNode, backend="nccl"),
-                        is_first_node=(NODE_RANK == 0),
-                        is_last_node=(NODE_RANK == 1),
-                        max_batch_size=max_batch_size,
-                    )
     else:
         if model_name == "Mistral-7B-Instruct-v0.3":
             tokenizer = MistralTokenizer.from_file(
@@ -568,7 +528,7 @@ def run_dist(
             [prompts[0]],
             tokenizer,
             model,
-            max_tokens=max_tokens,
+            max_tokens=5,
             temperature=T,
             top_p=P,
             eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
@@ -669,7 +629,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_version",
         type=str,
-        choices=["v0", "v1", "v2", "v3", "v4", "PP", "TP", "PP+TP", "EP", "PP+EP"],
+        choices=["v0", "v1", "v2", "PP", "TP", "PP+TP", "EP", "PP+EP"],
     )
     args = parser.parse_args()
 

@@ -13,6 +13,7 @@ from mistral_inference.lora import LoRALoaderMixin
 from mistral_inference.model import ModelBase
 from mistral_inference.rope import precompute_freqs_cis
 from mistral_inference.vision_encoder import VisionLanguageAdapter, VisionTransformer
+
 from engine.cache import BufferCache, CacheInputMetadata
 from engine.transformer_layers import RMSNorm, TransformerBlock
 from engine.transformer_layers_tp import TransformerBlockTP
@@ -294,13 +295,16 @@ class Transformer(ModelBase, LoRALoaderMixin):
                     h, src=dist.get_rank() - self.tp_rank, group=self.tp_group
                 )
 
-        input_metadata: List[CacheInputMetadata] | List[SimpleInputMetadata]
-        input_metadata = cache.get_input_metadata(seqlens)
+        # input_metadata: List[CacheInputMetadata] | List[SimpleInputMetadata]
+        # input_metadata = cache.get_input_metadata(seqlens)
+        cache_metadata = cache.get_input_metadata(seqlens)
+
         # freqs_cis is always the same for every layer
-        freqs_cis = self.freqs_cis[input_metadata[0].positions]
+        # freqs_cis = self.freqs_cis[input_metadata[0].positions]
+        freqs_cis = self.freqs_cis[cache_metadata.positions]
         for local_layer_id, layer in enumerate(self.layers.values()):
             # assert input_metadata is not None
-            cache_metadata = input_metadata[local_layer_id]
+            # cache_metadata = input_metadata[local_layer_id]
             # assert isinstance(cache_metadata, CacheInputMetadata)
             cache_view = cache.get_view(local_layer_id, cache_metadata)
             h = layer(h, freqs_cis, cache_view)
@@ -335,7 +339,6 @@ class Transformer(ModelBase, LoRALoaderMixin):
             outs = self.output(h)
 
         if self.num_pipeline_ranks > 1:
-            # dist.broadcast(outs, src=self.num_pipeline_ranks - 1)
             dist.broadcast(outs, src=dist.get_world_size() - 1)
 
         if self.softmax_fp32:
