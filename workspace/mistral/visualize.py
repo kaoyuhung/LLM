@@ -70,13 +70,6 @@ def draw_throughput(folder):
             marker="o",
         )
         ax.plot(
-            x[: len(y["v3"])],
-            y["v3"],
-            label="v3",
-            linewidth=1.5,
-            marker="o",
-        )
-        ax.plot(
             x[: len(y["PP"])],
             y["PP"],
             label="PP",
@@ -84,26 +77,33 @@ def draw_throughput(folder):
             marker="o",
         )
         ax.plot(
-            x[: len(y["PP+TP-V1"])],
-            y["PP+TP-V1"],
-            label="PP+TP-V1",
+            x[: len(y["TP"])],
+            y["TP"],
+            label="TP",
             linewidth=1.5,
             marker="o",
         )
-        # ax.plot(
-        #     x[: len(y["PP+TP-V2"])],
-        #     y["PP+TP-V2"],
-        #     label="PP+TP-V2",
-        #     linewidth=1.5,
-        #     marker="o",
-        # )
-        # ax.plot(
-        #     x[: len(y["PP+EP"])],
-        #     y["PP+EP"],
-        #     label="PP+EP",
-        #     linewidth=1.5,
-        #     marker="o",
-        # )
+        ax.plot(
+            x[: len(y["EP"])],
+            y["EP"],
+            label="EP",
+            linewidth=1.5,
+            marker="o",
+        )
+        ax.plot(
+            x[: len(y["PP+TP"])],
+            y["PP+TP"],
+            label="PP+TP",
+            linewidth=1.5,
+            marker="o",
+        )
+        ax.plot(
+            x[: len(y["PP+EP"])],
+            y["PP+EP"],
+            label="PP+EP",
+            linewidth=1.5,
+            marker="o",
+        )
         ax.set_xlabel("Batch Size")
         ax.set_ylabel("Throughput (tokens/s)")
         ax.legend()

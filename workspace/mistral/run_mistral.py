@@ -1,5 +1,6 @@
 import os
 import sys
+import math
 
 sys.path.append("..")
 import argparse
@@ -342,21 +343,19 @@ def run_default(
                 i * batch_size : i * batch_size
                 + min(batch_size, len(prompts) - i * batch_size)
             ]
-            n_prefill_token, prefill_time, out_tokens, decode_time, _ = (
-                measure_generate(
-                    inputs,
-                    tokenizer,
-                    model,
-                    max_tokens=max_tokens,
-                    temperature=T,
-                    top_p=P,
-                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-                )
+            n_prefill_token, prefill_time, out_tokens, decode_time = measure_generate(
+                inputs,
+                tokenizer,
+                model,
+                max_tokens=max_tokens,
+                temperature=T,
+                top_p=P,
+                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
             n_decode_token = len(sum(out_tokens, [])) - batch_size
             print(f"evalItr{i} (batch_size={batch_size})")
             print(
-                f"Prefill time: {prefill_time:.2f} ms, Decode time: {(decode_time):.2f} ms, Prefill throughput: {n_prefill_token/prefill_time:.2f} tokens/s, Decode throughtput: {(n_decode_token/decode_time):.2f} tokens/s"
+                f"Prefill time: {prefill_time:.2f} s, Decode time: {(decode_time):.2f} s, Prefill throughput: {n_prefill_token/prefill_time:.2f} tokens/s, Decode throughtput: {(n_decode_token/decode_time):.2f} tokens/s"
             )
             print("-" * 100)
 
@@ -382,6 +381,24 @@ def run_default(
             eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             reuslt_folder=f"./profile_result_default_{model_name}",
         )
+    elif mode == "eval":
+        for i in range(eval_nItrs):
+            _, logprobs = generate(
+                prompts[
+                    i * batch_size : i * batch_size
+                    + min(batch_size, len(prompts) - i * batch_size)
+                ],
+                tokenizer,
+                model,
+                max_tokens=max_tokens,
+                temperature=T,
+                top_p=P,
+                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            )
+            for logprob in logprobs:
+                avgnll = -sum(logprob) / len(logprob)
+                ppl = math.exp(avgnll)
+                print(f"eval_nItrs{i} (batch_size={batch_size}): PPL={ppl}")
 
 
 def run_dist(
@@ -477,23 +494,21 @@ def run_dist(
                 i * batch_size : i * batch_size
                 + min(batch_size, len(prompts) - i * batch_size)
             ]
-            n_prefill_token, prefill_time, out_tokens, decode_time, _ = (
-                measure_generate(
-                    inputs,
-                    tokenizer,
-                    model,
-                    max_tokens=max_tokens,
-                    temperature=T,
-                    top_p=P,
-                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-                )
+            n_prefill_token, prefill_time, out_tokens, decode_time = measure_generate(
+                inputs,
+                tokenizer,
+                model,
+                max_tokens=max_tokens,
+                temperature=T,
+                top_p=P,
+                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
             n_decode_token = len(sum(out_tokens, [])) - batch_size
 
             if LOCAL_RANK == 0:
                 print(f"evalItr{i} (batch_size={batch_size})")
                 print(
-                    f"Prefill time: {prefill_time:.2f}ms, Decode time: {(decode_time):.2f} ms, Prefill throughput: {n_prefill_token/prefill_time:.2f} tokens/s, Decode throughtput: {(n_decode_token/decode_time):.2f} tokens/s"
+                    f"Prefill time: {prefill_time:.2f} s, Decode time: {(decode_time):.2f} s, Prefill throughput: {n_prefill_token/prefill_time:.2f} tokens/s, Decode throughtput: {(n_decode_token/decode_time):.2f} tokens/s"
                 )
                 print("-" * 100)
 
@@ -524,7 +539,7 @@ def run_dist(
                 )
         dist.barrier()
 
-        out_tokens, _ = nsys_profile_generate(
+        nsys_profile_generate(
             [prompts[0]],
             tokenizer,
             model,
@@ -574,6 +589,26 @@ def run_dist(
             local_rank=LOCAL_RANK,
             result_folder=f"./profile_result_dist_{model_name}_{model_version}",
         )
+    elif mode == "eval":
+        for i in range(eval_nItrs):
+            _, logprobs = generate(
+                prompts[
+                    i * batch_size : i * batch_size
+                    + min(batch_size, len(prompts) - i * batch_size)
+                ],
+                tokenizer,
+                model,
+                max_tokens=max_tokens,
+                temperature=T,
+                top_p=P,
+                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            )
+            if LOCAL_RANK == 0:
+                for logprob in logprobs:
+                    avgnll = -sum(logprob) / len(logprob)
+                    ppl = math.exp(avgnll)
+                    print(f"eval_nItrs{i} (batch_size={batch_size}): PPL={ppl}")
+            dist.barrier()
 
     dist.destroy_process_group()
 
@@ -599,7 +634,7 @@ if __name__ == "__main__":
         "--mode",
         type=str,
         default="measure",
-        choices=["genText", "printModel", "measure", "nsys_profile", "profile"],
+        choices=["genText", "printModel", "measure", "nsys_profile", "profile", "eval"],
     )
     parser.add_argument(
         "--prompt_path",

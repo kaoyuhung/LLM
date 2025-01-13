@@ -46,28 +46,12 @@ def measure_generate(
     cache.to(device=model.device, dtype=model.dtype)
     cache.reset()
 
-    # Bookkeeping
-    logprobs: List[List[float]] = [[] for _ in range(B)]
-    last_token_prelogits = None
-
     input_ids = sum(encoded_prompts, [])
     prelogits = model.forward(
         torch.tensor(input_ids, device=model.device, dtype=torch.long),
         seqlens=seqlens,
         cache=cache,
     )
-    logits = torch.log_softmax(prelogits, dim=-1)
-
-    offset = 0
-    for i_seq, sequence in enumerate(encoded_prompts):
-        logprobs[i_seq].extend(
-            [
-                logits[offset + i, sequence[i + 1]].item()
-                for i in range(len(sequence) - 1)
-            ]
-        )
-        offset += len(sequence)
-
     last_token_prelogits = prelogits.index_select(
         0,
         torch.tensor([len(p) for p in encoded_prompts], device=prelogits.device).cumsum(
@@ -75,15 +59,13 @@ def measure_generate(
         )
         - 1,
     )
-
-    # decode
-    generated_tensors = []
-    is_finished = torch.tensor([False for _ in range(B)])
-
     if distribued:
         dist.barrier()
     t1 = time.time()
 
+    # decode
+    generated_tensors = []
+    is_finished = torch.tensor([False for _ in range(B)])
     for _ in range(max_tokens):
         next_token = sample(last_token_prelogits, temperature=temperature, top_p=top_p)
 
@@ -92,11 +74,6 @@ def measure_generate(
 
         if is_finished.all():
             break
-
-        last_token_logits = torch.log_softmax(last_token_prelogits, dim=-1)
-
-        for i in range(B):
-            logprobs[i].append(last_token_logits[i, next_token[i]].item())
 
         generated_tensors.append(next_token[:, None])
 
@@ -114,13 +91,7 @@ def measure_generate(
         dist.barrier()
     t2 = time.time()
 
-    return (
-        len(input_ids),
-        t1 - t0,
-        generated_tokens,
-        t2 - t1,
-        logprobs,
-    )
+    return (len(input_ids), t1 - t0, generated_tokens, t2 - t1)
 
 
 @torch.inference_mode()
@@ -163,10 +134,6 @@ def nsys_profile_generate(
     cache.to(device=model.device, dtype=model.dtype)
     cache.reset()
 
-    # Bookkeeping
-    logprobs: List[List[float]] = [[] for _ in range(B)]
-    last_token_prelogits = None
-
     assert all(len(p) > 0 for p in encoded_prompts)
     torch.cuda.nvtx.range_push(f"{local_rank} - prefill forward")
     prelogits = model.forward(
@@ -175,17 +142,6 @@ def nsys_profile_generate(
         cache=cache,
     )
     torch.cuda.nvtx.range_pop()
-    logits = torch.log_softmax(prelogits, dim=-1)
-
-    offset = 0
-    for i_seq, sequence in enumerate(encoded_prompts):
-        logprobs[i_seq].extend(
-            [
-                logits[offset + i, sequence[i + 1]].item()
-                for i in range(len(sequence) - 1)
-            ]
-        )
-        offset += len(sequence)
 
     last_token_prelogits = prelogits.index_select(
         0,
@@ -213,11 +169,6 @@ def nsys_profile_generate(
         if is_finished.all():
             break
 
-        last_token_logits = torch.log_softmax(last_token_prelogits, dim=-1)
-
-        for i in range(B):
-            logprobs[i].append(last_token_logits[i, next_token[i]].item())
-
         generated_tensors.append(next_token[:, None])
 
         torch.cuda.nvtx.range_push(f"{local_rank} - decode forward")
@@ -235,7 +186,7 @@ def nsys_profile_generate(
     if distributed:
         dist.barrier()
     torch.cuda.cudart().cudaProfilerStop()
-    return generated_tokens, logprobs
+    return generated_tokens
 
 
 @torch.inference_mode()
@@ -282,30 +233,12 @@ def profile_generate(
     cache.to(device=model.device, dtype=model.dtype)
     cache.reset()
 
-    # Bookkeeping
-    logprobs: List[List[float]] = [[] for _ in range(B)]
-    last_token_prelogits = None
-
     input_ids = sum(encoded_prompts, [])
-
     prelogits = model.forward(
         torch.tensor(input_ids, device=model.device, dtype=torch.long),
         seqlens=seqlens,
         cache=cache,
     )
-
-    logits = torch.log_softmax(prelogits, dim=-1)
-
-    offset = 0
-    for i_seq, sequence in enumerate(encoded_prompts):
-        logprobs[i_seq].extend(
-            [
-                logits[offset + i, sequence[i + 1]].item()
-                for i in range(len(sequence) - 1)
-            ]
-        )
-        offset += len(sequence)
-
     last_token_prelogits = prelogits.index_select(
         0,
         torch.tensor([len(p) for p in encoded_prompts], device=prelogits.device).cumsum(
@@ -337,7 +270,6 @@ def profile_generate(
                     next_token, seqlens=[1] * B, cache=cache
                 )
                 p.step()
-
     return
 
 
