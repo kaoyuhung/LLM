@@ -97,12 +97,14 @@ class Transformer(ModelBase, LoRALoaderMixin):
 
             if self.num_ep_ranks:
                 if (
-                    self.num_pipeline_ranks > 1
-                    or self.num_ep_ranks == args.moe.num_experts
+                    self.num_pipeline_ranks > 1  # PP+EP
+                    or self.num_ep_ranks == dist.get_world_size()
                 ):
+                    assert (args.moe.num_experts % self.num_ep_ranks) == 0
                     self.n_expert = args.moe.num_experts // self.num_ep_ranks
                     self.expert_off = self.ep_rank * self.n_expert
                     self.ep_hidden_dim = args.hidden_dim
+                    self.ep_hidden_dim_off = None
 
                 else:
                     assert n_process_per_node != None
@@ -381,10 +383,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
                             self.expert_off <= expert_id
                             and expert_id < self.expert_off + self.n_expert
                         ):
-                            if (
-                                self.num_pipeline_ranks == 1
-                                and self.num_ep_ranks < self.args.moe.num_experts
-                            ):  # intra-node TP and inter-node EP
+                            if self.ep_hidden_dim_off:
                                 if k.endswith("w1.weight") or k.endswith("w3.weight"):
                                     v = v[
                                         self.ep_hidden_dim_off : self.ep_hidden_dim_off
@@ -521,14 +520,15 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 n_process_per_node = torch.unique(gather_tensor, return_counts=True)[
                     1
                 ].tolist()
-                ep_rank, acc = None, 0
-                for i, n_proc in enumerate(n_process_per_node):
-                    acc += n_proc
-                    if acc > dist.get_rank():
-                        ep_rank = i
-                        break
-                assert ep_rank != None
-                num_ep_ranks = len(n_process_per_node)
+                if len(n_process_per_node) > 1:
+                    ep_rank, acc = None, 0
+                    for i, n_proc in enumerate(n_process_per_node):
+                        acc += n_proc
+                        if acc > dist.get_rank():
+                            ep_rank = i
+                            break
+                    assert ep_rank != None
+                    num_ep_ranks = len(n_process_per_node)
 
         model_args.max_batch_size = max_batch_size
         with torch.device("meta"):

@@ -453,7 +453,7 @@ def run_dist(
                 top_p=P,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
-            if LOCAL_RANK == LOCAL_WORLD_SIZE - 1:
+            if WORLD_RANK == 0:
                 for id in range(len(out_tokens)):
                     prompt_id = i * batch_size + id
                     result = tokenizer.instruct_tokenizer.tokenizer.decode(
@@ -465,7 +465,7 @@ def run_dist(
         dist.barrier()
 
     elif mode == "measure":
-        if LOCAL_RANK == 0:
+        if WORLD_RANK == 0:
             for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
                 generate(
                     [prompts[0]],
@@ -505,7 +505,7 @@ def run_dist(
             )
             n_decode_token = len(sum(out_tokens, [])) - batch_size
 
-            if LOCAL_RANK == 0:
+            if WORLD_RANK == 0:
                 print(f"evalItr{i} (batch_size={batch_size})")
                 print(
                     f"Prefill time: {prefill_time:.2f} s, Decode time: {(decode_time):.2f} s, Prefill throughput: {n_prefill_token/prefill_time:.2f} tokens/s, Decode throughtput: {(n_decode_token/decode_time):.2f} tokens/s"
@@ -515,7 +515,7 @@ def run_dist(
             dist.barrier()
 
     elif mode == "nsys_profile":
-        if LOCAL_RANK == 0:
+        if WORLD_RANK == 0:
             for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
                 generate(
                     [prompts[0]],
@@ -554,7 +554,7 @@ def run_dist(
         dist.barrier()
 
     elif mode == "profile":
-        if LOCAL_RANK == 0:
+        if WORLD_RANK == 0:
             for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
                 generate(
                     [prompts[0]],
@@ -589,6 +589,7 @@ def run_dist(
             local_rank=LOCAL_RANK,
             result_folder=f"./profile_result_dist_{model_name}_{model_version}",
         )
+
     elif mode == "eval":
         for i in range(eval_nItrs):
             _, logprobs = generate(
@@ -603,7 +604,7 @@ def run_dist(
                 top_p=P,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
-            if LOCAL_RANK == 0:
+            if WORLD_RANK == 0:
                 for logprob in logprobs:
                     avgnll = -sum(logprob) / len(logprob)
                     ppl = math.exp(avgnll)
