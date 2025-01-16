@@ -20,6 +20,7 @@ from huggingface_hub import snapshot_download
 from util import setup_seed, load_data
 from torchinfo import summary
 from tqdm import tqdm
+from datetime import timedelta
 
 
 def getModelandTokenizeer(
@@ -35,17 +36,49 @@ def getModelandTokenizeer(
     mistral_models_path = Path(mistral_models_path)
     if not mistral_models_path.exists() and (not distributed or LOCAL_RANK == 0):
         mistral_models_path.mkdir(parents=True, exist_ok=True)
-        snapshot_download(
-            repo_id="mistralai/" + model_name,
-            allow_patterns=[
-                "*.json",
-                "*.safetensors",
-                "tokenizer.model*",
-            ],
-            local_dir=mistral_models_path,
-        )
+        if model_name == "Mistral-7B-Instruct-v0.3":
+            snapshot_download(
+                repo_id="mistralai/" + model_name,
+                allow_patterns=[
+                    "*.json",
+                    "*.safetensors",
+                    "tokenizer.model*",
+                ],
+                local_dir=mistral_models_path,
+            )
+        else:
+            import requests, tarfile
+
+            if model_name == "Mixtral-8x7B-Instruct-v0.1":
+                url = "https://models.mistralcdn.com/mixtral-8x7b-v0-1/Mixtral-8x7B-v0.1-Instruct.tar"
+
+            response = requests.get(
+                url=url,
+                stream=True,
+            )
+            filename = os.path.join(str(mistral_models_path), url.split("/")[-1])
+            response.raise_for_status()
+            total_size = int(response.headers.get("content-length", 0))
+            print(f"Download {model_name} Weights")
+            with open(filename, "wb") as file:
+                with tqdm(
+                    total=total_size,
+                    unit="B",
+                    unit_scale=True,
+                    desc=f"Downloading {filename}",
+                ) as progress_bar:
+                    for chunk in response.iter_content(chunk_size=1024):
+                        if chunk:
+                            file.write(chunk)
+                            progress_bar.update(len(chunk))
+
+            with tarfile.open(filename, "r") as tar:
+                tar.extractall(path=str(mistral_models_path))
+            os.remove(filename)
 
     if distributed:
+        dist.barrier()
+
         if model_name == "Mistral-7B-Instruct-v0.3":
             tokenizer = MistralTokenizer.from_file(
                 f"{mistral_models_path}/tokenizer.model.v3"
@@ -112,7 +145,6 @@ def getModelandTokenizeer(
                     device=device,
                     dtype=dtype,
                 )
-
             elif model_version == "TP":
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
@@ -127,7 +159,6 @@ def getModelandTokenizeer(
                     device=device,
                     dtype=dtype,
                 )
-
             elif model_version == "PP+TP":
                 gather_tensor = torch.empty(WORLD_SIZE, dtype=torch.int, device=device)
                 dist.all_gather_into_tensor(
@@ -152,7 +183,6 @@ def getModelandTokenizeer(
                     device=device,
                     dtype=dtype,
                 )
-
             elif model_version == "EP":
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
@@ -196,7 +226,6 @@ def getModelandTokenizeer(
                     device=device,
                     dtype=dtype,
                 )
-
             else:
                 global_group = dist.new_group(
                     list(range(WORLD_SIZE)), use_local_synchronization=True
@@ -417,7 +446,11 @@ def run_dist(
 ):
     device = torch.device(f"cuda:{LOCAL_RANK}")
     dist.init_process_group(
-        backend="nccl", world_size=WORLD_SIZE, rank=WORLD_RANK, device_id=device
+        backend="nccl",
+        world_size=WORLD_SIZE,
+        rank=WORLD_RANK,
+        device_id=device,
+        timeout=timedelta(hours=2),
     )
     model, tokenizer = getModelandTokenizeer(
         model_name, model_path, batch_size, device, dtype, True, model_version
