@@ -51,6 +51,8 @@ def getModelandTokenizeer(
 
             if model_name == "Mixtral-8x7B-Instruct-v0.1":
                 url = "https://models.mistralcdn.com/mixtral-8x7b-v0-1/Mixtral-8x7B-v0.1-Instruct.tar"
+            elif model_name == "Mixtral-8x22B-Instruct-v0.1":
+                url = "https://models.mistralcdn.com/mixtral-8x22b-v0-3/mixtral-8x22B-Instruct-v0.3.tar"
 
             response = requests.get(
                 url=url,
@@ -78,11 +80,16 @@ def getModelandTokenizeer(
 
     if distributed:
         dist.barrier()
-
         if model_name == "Mistral-7B-Instruct-v0.3":
             tokenizer = MistralTokenizer.from_file(
                 f"{mistral_models_path}/tokenizer.model.v3"
             )
+        elif model_name == "Mixtral-8x7B-Instruct-v0.1":
+            tokenizer = MistralTokenizer.v1()
+        elif model_name == "Mixtral-8x22B-Instruct-v0.1":
+            tokenizer = MistralTokenizer.v3()
+
+        if model_name == "Mistral-7B-Instruct-v0.3":
             if not model_version or model_version == "PP":
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
@@ -133,8 +140,10 @@ def getModelandTokenizeer(
                     dtype=dtype,
                 )
 
-        elif model_name == "Mixtral-8x7B-Instruct-v0.1":
-            tokenizer = MistralTokenizer.v1()
+        elif (
+            model_name == "Mixtral-8x7B-Instruct-v0.1"
+            or model_name == "Mixtral-8x22B-Instruct-v0.1"
+        ):
             if not model_version or model_version == "PP":
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
@@ -654,7 +663,11 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="Mistral-7B-Instruct-v0.3",
-        choices=["Mistral-7B-Instruct-v0.3", "Mixtral-8x7B-Instruct-v0.1"],
+        choices=[
+            "Mistral-7B-Instruct-v0.3",
+            "Mixtral-8x7B-Instruct-v0.1",
+            "Mixtral-8x22B-Instruct-v0.1",
+        ],
     )
     parser.add_argument(
         "--model_path",
