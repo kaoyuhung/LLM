@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ $# -lt 9 ]; then
-  echo "Usage: $0 <nnodes> <nproc> <node_rank> <master_addr:master_port> <mode> <eval_nItrs> <model> <model_path> <model_version> [<output_dir>]"
+  echo "Usage: $0 <nnodes> <nproc> <node_rank> <master_addr:master_port> <mode> <eval_nItrs> <model> <model_path> <model_version>"
   exit 1
 fi
 
@@ -20,18 +20,16 @@ model=${7}
 model_path=${8}
 model_version=${9}
 
-if [ "$node_rank" -eq 0 ]; then
-  if [ ! -z "${10}" ]; then
-    output_folder=${10}
-  else
-    output_folder="result"
-  fi
+if [ ! -z "$SLURM_NODEID" ]; then
+  output_folder="result/job${SLURM_JOB_ID}"
+  output_file="${mode}_${model}_${model_version}_node${SLURM_NODEID}_multinode.txt"
+else
+  output_folder="result"
   output_file="${mode}_${model}_${model_version}_multinode.txt"
-
-  mkdir -p $output_folder
-  if [ -e "$output_folder/$output_file" ]; then
-    rm $output_folder/$output_file
-  fi
+fi
+mkdir -p $output_folder
+if [ -e "$output_folder/$output_file" ]; then
+  rm $output_folder/$output_file
 fi
 
 export OMP_NUM_THREADS=4
@@ -42,17 +40,13 @@ CMD="torchrun \
     --node-rank=$node_rank \
     --master-addr=$master_addr \
     --master-port=$master_port \
-    --max-restarts 3 \
-    run_mistral.py --mode $mode --node_rank $node_rank --model $model --model_path $model_path $model_version_arg --eval_nItrs $eval_nItrs"
+    --max-restarts=3 \
+    run_mistral.py --mode $mode --model $model --model_path $model_path --model_version $model_version --eval_nItrs $eval_nItrs"
 
 if [ $mode = "measure" ]; then
   for N in 1 2 4 8 16 32 64 128 256
   do
-    if [ "$node_rank" -eq 0 ]; then
-      $CMD --batch_size $N >> $output_folder/$output_file
-    else
-      $CMD --batch_size $N
-    fi
+    $CMD --batch_size $N >> $output_folder/$output_file
   done
 
 elif [ $mode = "nsys_profile" ]; then
@@ -63,9 +57,5 @@ elif [ $mode = "profile" ]; then
   $CMD
 
 else
-  if [ "$node_rank" -eq 0 ]; then
-    $CMD >> $output_folder/$output_file
-  else
-    $CMD
-  fi
+  $CMD >> $output_folder/$output_file
 fi

@@ -495,7 +495,7 @@ def run_dist(
                 top_p=P,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
-            if WORLD_RANK == 0:
+            if LOCAL_RANK == 0:
                 for id in range(len(out_tokens)):
                     prompt_id = i * batch_size + id
                     result = tokenizer.instruct_tokenizer.tokenizer.decode(
@@ -507,7 +507,7 @@ def run_dist(
         dist.barrier()
 
     elif mode == "measure":
-        if WORLD_RANK == 0:
+        if LOCAL_RANK == 0:
             for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
                 generate(
                     [prompts[0]],
@@ -547,7 +547,7 @@ def run_dist(
             )
             n_decode_token = len(sum(out_tokens, [])) - batch_size
 
-            if WORLD_RANK == 0:
+            if LOCAL_RANK == 0:
                 print(f"evalItr{i} (batch_size={batch_size})")
                 print(
                     f"Prefill time: {prefill_time:.2f} s, Decode time: {(decode_time):.2f} s, Prefill throughput: {n_prefill_token/prefill_time:.2f} tokens/s, Decode throughtput: {(n_decode_token/decode_time):.2f} tokens/s"
@@ -557,7 +557,7 @@ def run_dist(
             dist.barrier()
 
     elif mode == "nsys_profile":
-        if WORLD_RANK == 0:
+        if LOCAL_RANK == 0:
             for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
                 generate(
                     [prompts[0]],
@@ -596,7 +596,7 @@ def run_dist(
         dist.barrier()
 
     elif mode == "profile":
-        if WORLD_RANK == 0:
+        if LOCAL_RANK == 0:
             for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
                 generate(
                     [prompts[0]],
@@ -646,7 +646,7 @@ def run_dist(
                 top_p=P,
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
-            if WORLD_RANK == 0:
+            if LOCAL_RANK == 0:
                 for logprob in logprobs:
                     avgnll = -sum(logprob) / len(logprob)
                     ppl = math.exp(avgnll)
@@ -701,7 +701,6 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_iters", type=int, default=1)
     parser.add_argument("--node-id", type=int)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--node_rank", type=int, default=0)
     dtype_map = {
         "f16": torch.float16,
         "bf16": torch.bfloat16,
@@ -722,7 +721,7 @@ if __name__ == "__main__":
         LOCAL_WORLD_SIZE = int(os.environ["LOCAL_WORLD_SIZE"])
         WORLD_SIZE = int(os.environ["WORLD_SIZE"])
         WORLD_RANK = int(os.environ["RANK"])
-        NODE_RANK = args.node_rank
+        NODE_RANK = int(os.environ["GROUP_RANK"])
 
         run_dist(
             args.model,

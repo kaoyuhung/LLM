@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ $# -lt 6 ]; then
-  echo "Usage: $0 <nproc> <mode> <eval_nItrs> <model> <model_path> <model_version> [<output_dir>]"
+  echo "Usage: $0 <nproc> <mode> <eval_nItrs> <model> <model_path> <model_version>"
   exit 1
 fi
 
@@ -11,8 +11,9 @@ eval_nItrs=${3}
 model=${4}
 model_path=${5}
 model_version=${6}
-if [ ! -z "${7}" ]; then
-  output_folder=${7}
+  
+if [ ! -z "$SLURM_NODEID" ]; then
+  output_folder="result/job${SLURM_JOB_ID}"
 else
   output_folder="result"
 fi
@@ -29,7 +30,7 @@ CMD="torchrun \
     --standalone \
     --nnodes=1 \
     --nproc-per-node=$nproc \
-    run_mistral.py --mode $mode --model $model --model_path $model_path --eval_nItrs $eval_nItrs --model_version $model_version"
+    run_mistral.py --mode $mode --model $model --model_path $model_path --model_version $model_version --eval_nItrs $eval_nItrs"
 
 if [ $mode = "measure" ]; then
    for N in 1 2 4 8 16 32 64 128 256
