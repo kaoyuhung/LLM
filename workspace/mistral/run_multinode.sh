@@ -1,14 +1,19 @@
 #!/bin/bash
 
 if [ $# -lt 9 ]; then
-  echo "Usage: $0 <nnodes> <nproc> <node_rank> <master_addr> <mode> <eval_nItrs> <model> <model_path> <model_version> [<output_dir>]"
+  echo "Usage: $0 <nnodes> <nproc> <node_rank> <master_addr:master_port> <mode> <eval_nItrs> <model> <model_path> <model_version> [<output_dir>]"
   exit 1
 fi
 
 nnodes=${1}
 nproc=${2}
-node_rank=${3}
-master_addr=${4}
+if [ ! -z "${SLURM_NODEID}" ]; then
+  node_rank=${SLURM_NODEID}
+else
+  node_rank=${3}
+fi
+master_addr=${4%%:*}
+master_port=${4##*:}
 mode=${5}
 eval_nItrs=${6}
 model=${7}
@@ -36,7 +41,7 @@ CMD="torchrun \
     --nproc-per-node=$nproc \
     --node-rank=$node_rank \
     --master-addr=$master_addr \
-    --master-port=5000 \
+    --master-port=$master_port \
     --max-restarts 3 \
     run_mistral.py --mode $mode --node_rank $node_rank --model $model --model_path $model_path $model_version_arg --eval_nItrs $eval_nItrs"
 
