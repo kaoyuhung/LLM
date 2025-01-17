@@ -17,7 +17,7 @@ from engine.generate import (
 )
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from huggingface_hub import snapshot_download
-from util import setup_seed, load_data
+from util import setup_seed, load_data, get_nnodes
 from torchinfo import summary
 from tqdm import tqdm
 from datetime import timedelta
@@ -115,27 +115,23 @@ def getModelandTokenizeer(
                     dtype=dtype,
                 )
             elif model_version == "PP+TP":
-                gather_tensor = torch.empty(WORLD_SIZE, dtype=torch.int, device=device)
-                dist.all_gather_into_tensor(
-                    gather_tensor,
-                    torch.tensor([NODE_RANK], dtype=torch.int, device=device),
-                )
-
-                n_process_per_node = torch.unique(gather_tensor, return_counts=True)[
-                    1
-                ].tolist()
-                num_pp_ranks = len(n_process_per_node)
-                assert num_pp_ranks > 1
-                RanksOnSameNode = torch.where(gather_tensor == NODE_RANK)[0].tolist()
+                assert NNODES > 1
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
                     max_batch_size=max_batch_size,
                     pipeline_rank=NODE_RANK,
-                    num_pipeline_ranks=num_pp_ranks,
+                    num_pipeline_ranks=NNODES,
                     tp_rank=LOCAL_RANK,
                     num_tp_ranks=LOCAL_WORLD_SIZE,
-                    tp_gorup=dist.new_group(ranks=RanksOnSameNode, backend="nccl"),
-                    n_process_per_node=n_process_per_node,
+                    tp_gorup=dist.new_group(
+                        ranks=list(
+                            range(
+                                WORLD_RANK - LOCAL_RANK,
+                                WORLD_RANK - LOCAL_RANK + LOCAL_WORLD_SIZE,
+                            )
+                        ),
+                        backend="nccl",
+                    ),
                     device=device,
                     dtype=dtype,
                 )
@@ -169,26 +165,40 @@ def getModelandTokenizeer(
                     dtype=dtype,
                 )
             elif model_version == "PP+TP":
-                gather_tensor = torch.empty(WORLD_SIZE, dtype=torch.int, device=device)
-                dist.all_gather_into_tensor(
-                    gather_tensor,
-                    torch.tensor([NODE_RANK], dtype=torch.int, device=device),
-                )
-                n_process_per_node = torch.unique(gather_tensor, return_counts=True)[
-                    1
-                ].tolist()
-                num_pp_ranks = len(n_process_per_node)
-                assert num_pp_ranks > 1
-                RanksOnSameNode = torch.where(gather_tensor == NODE_RANK)[0].tolist()
+                assert NNODES > 1
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
                     max_batch_size=max_batch_size,
                     pipeline_rank=NODE_RANK,
-                    num_pipeline_ranks=num_pp_ranks,
+                    num_pipeline_ranks=NNODES,
                     tp_rank=LOCAL_RANK,
                     num_tp_ranks=LOCAL_WORLD_SIZE,
-                    tp_gorup=dist.new_group(ranks=RanksOnSameNode, backend="nccl"),
-                    n_process_per_node=n_process_per_node,
+                    tp_gorup=dist.new_group(
+                        ranks=list(
+                            range(
+                                WORLD_RANK - LOCAL_RANK,
+                                WORLD_RANK - LOCAL_RANK + LOCAL_WORLD_SIZE,
+                            )
+                        ),
+                        backend="nccl",
+                    ),
+                    device=device,
+                    dtype=dtype,
+                )
+            elif model_version == "TP+EP":
+                assert NNODES > 1
+                model = Transformer.from_folder(
+                    folder=mistral_models_path,
+                    max_batch_size=max_batch_size,
+                    pipeline_rank=0,
+                    num_pipeline_ranks=1,
+                    tp_rank=WORLD_RANK,
+                    num_tp_ranks=WORLD_SIZE,
+                    tp_gorup=dist.new_group(
+                        ranks=list(range(WORLD_SIZE)), backend="nccl"
+                    ),
+                    ep_rank=NODE_RANK,
+                    num_ep_ranks=NNODES,
                     device=device,
                     dtype=dtype,
                 )
@@ -196,7 +206,6 @@ def getModelandTokenizeer(
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
                     max_batch_size=max_batch_size,
-                    node_rank=NODE_RANK,
                     pipeline_rank=0,
                     num_pipeline_ranks=1,
                     tp_rank=WORLD_RANK,
@@ -210,28 +219,59 @@ def getModelandTokenizeer(
                     dtype=dtype,
                 )
             elif model_version == "PP+EP":
-                gather_tensor = torch.empty(WORLD_SIZE, dtype=torch.int, device=device)
-                dist.all_gather_into_tensor(
-                    gather_tensor,
-                    torch.tensor([NODE_RANK], dtype=torch.int, device=device),
-                )
-                n_process_per_node = torch.unique(gather_tensor, return_counts=True)[
-                    1
-                ].tolist()
-                num_pp_ranks = len(n_process_per_node)
-                assert num_pp_ranks > 1
-                RanksOnSameNode = torch.where(gather_tensor == NODE_RANK)[0].tolist()
+                assert NNODES > 1
                 model = Transformer.from_folder(
                     folder=mistral_models_path,
                     max_batch_size=max_batch_size,
                     pipeline_rank=NODE_RANK,
-                    num_pipeline_ranks=num_pp_ranks,
+                    num_pipeline_ranks=NNODES,
                     tp_rank=LOCAL_RANK,
                     num_tp_ranks=LOCAL_WORLD_SIZE,
-                    tp_gorup=dist.new_group(ranks=RanksOnSameNode, backend="nccl"),
-                    n_process_per_node=n_process_per_node,
+                    tp_gorup=dist.new_group(
+                        ranks=list(
+                            range(
+                                WORLD_RANK - LOCAL_RANK,
+                                WORLD_RANK - LOCAL_RANK + LOCAL_WORLD_SIZE,
+                            )
+                        ),
+                        backend="nccl",
+                    ),
                     ep_rank=LOCAL_RANK,
                     num_ep_ranks=LOCAL_WORLD_SIZE,
+                    device=device,
+                    dtype=dtype,
+                )
+            elif model_version == "TP+EP-1-1-2":
+                assert NNODES == 1 and WORLD_SIZE == 3
+                model = Transformer.from_folder(
+                    folder=mistral_models_path,
+                    max_batch_size=max_batch_size,
+                    pipeline_rank=0,
+                    num_pipeline_ranks=1,
+                    tp_rank=WORLD_RANK,
+                    num_tp_ranks=WORLD_SIZE,
+                    tp_gorup=dist.new_group(
+                        ranks=list(range(WORLD_SIZE)), backend="nccl"
+                    ),
+                    ep_rank=0 if WORLD_RANK == 0 else 1,
+                    num_ep_ranks=2,
+                    device=device,
+                    dtype=dtype,
+                )
+            elif model_version == "TP+EP-1-2-2":
+                assert NNODES == 1 and WORLD_SIZE == 4
+                model = Transformer.from_folder(
+                    folder=mistral_models_path,
+                    max_batch_size=max_batch_size,
+                    pipeline_rank=0,
+                    num_pipeline_ranks=1,
+                    tp_rank=WORLD_RANK,
+                    num_tp_ranks=WORLD_SIZE,
+                    tp_gorup=dist.new_group(
+                        ranks=list(range(WORLD_SIZE)), backend="nccl"
+                    ),
+                    ep_rank=WORLD_RANK // 2,
+                    num_ep_ranks=WORLD_SIZE // 2,
                     device=device,
                     dtype=dtype,
                 )
@@ -450,17 +490,10 @@ def run_dist(
     warmup_iters: int,
     prompt_path: str,
     batch_size: int,
+    device: torch.device,
     dtype: torch.dtype,
     model_version: Optional[str],
 ):
-    device = torch.device(f"cuda:{LOCAL_RANK}")
-    dist.init_process_group(
-        backend="nccl",
-        world_size=WORLD_SIZE,
-        rank=WORLD_RANK,
-        device_id=device,
-        timeout=timedelta(hours=2),
-    )
     model, tokenizer = getModelandTokenizeer(
         model_name, model_path, batch_size, device, dtype, True, model_version
     )
@@ -653,7 +686,7 @@ def run_dist(
                     print(f"eval_nItrs{i} (batch_size={batch_size}): PPL={ppl}")
             dist.barrier()
 
-    dist.destroy_process_group()
+    dist.barrier()
 
 
 if __name__ == "__main__":
@@ -710,7 +743,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_version",
         type=str,
-        choices=["v0", "v1", "v2", "PP", "TP", "PP+TP", "EP", "PP+EP"],
+        choices=[
+            "v0",
+            "v1",
+            "v2",
+            "PP",
+            "TP",
+            "PP+TP",
+            "TP+EP",
+            "EP",
+            "PP+EP",
+            "TP+EP-1-1-2",
+            "TP+EP-1-2-2",
+        ],
     )
     args = parser.parse_args()
 
@@ -722,7 +767,15 @@ if __name__ == "__main__":
         WORLD_SIZE = int(os.environ["WORLD_SIZE"])
         WORLD_RANK = int(os.environ["RANK"])
         NODE_RANK = int(os.environ["GROUP_RANK"])
-
+        device = torch.device(f"cuda:{LOCAL_RANK}")
+        dist.init_process_group(
+            backend="nccl",
+            world_size=WORLD_SIZE,
+            rank=WORLD_RANK,
+            device_id=device,
+            timeout=timedelta(hours=2),
+        )
+        NNODES = get_nnodes(NODE_RANK, device)
         run_dist(
             args.model,
             args.model_path,
@@ -734,9 +787,11 @@ if __name__ == "__main__":
             args.warmup_iters,
             args.prompt_path,
             args.batch_size,
+            device,
             dtype_map[args.dtype],
             args.model_version,
         )
+        dist.destroy_process_group()
 
     else:
         prompts = load_data(args.prompt_path)

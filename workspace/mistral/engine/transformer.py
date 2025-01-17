@@ -20,6 +20,15 @@ from engine.transformer_layers_tp import TransformerBlockTP
 from engine.transformer_layers_ep import TransformerBlockEP
 
 
+def get_nproc_per_rank(rank: int, device: torch.device):
+    gather_tensor = torch.empty(dist.get_world_size(), dtype=torch.int, device=device)
+    dist.all_gather_into_tensor(
+        gather_tensor,
+        torch.tensor([rank], dtype=torch.int, device=device),
+    )
+    return torch.unique(gather_tensor, return_counts=True)[1].tolist()
+
+
 @dataclass
 class SimpleInputMetadata:
     # rope absolute positions
@@ -43,10 +52,10 @@ class Transformer(ModelBase, LoRALoaderMixin):
         tp_rank: int = 0,
         num_tp_ranks: int = 1,
         tp_group: dist.distributed_c10d.ProcessGroup = None,
-        n_process_per_node: list = None,
         ep_rank: int = None,
         num_ep_ranks: int = None,
         softmax_fp32: bool = True,
+        device: torch.device = None,
     ):
         super().__init__()
         self.args = args
@@ -96,46 +105,56 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 ) * n_head_per_group
 
             if self.num_ep_ranks:
-                if (
-                    self.num_pipeline_ranks > 1  # PP+EP
-                    or self.num_ep_ranks == dist.get_world_size()
-                ):
-                    assert (args.moe.num_experts % self.num_ep_ranks) == 0
+                assert self.num_ep_ranks <= args.moe.num_experts
+
+                if self.num_ep_ranks == self.num_tp_ranks:  # Pure EP
+                    remainder = args.moe.num_experts % self.num_ep_ranks
                     self.n_expert = args.moe.num_experts // self.num_ep_ranks
                     self.expert_off = self.ep_rank * self.n_expert
+                    if self.num_ep_ranks - self.ep_rank <= remainder:
+                        self.n_expert += 1
+                        self.expert_off += remainder - (
+                            self.num_ep_ranks - self.ep_rank
+                        )
                     self.ep_hidden_dim = args.hidden_dim
                     self.ep_hidden_dim_off = None
 
                 else:
-                    assert n_process_per_node != None
-                    assert self.num_ep_ranks == len(n_process_per_node)
-                    n_process = sum(n_process_per_node)
-                    n_expert_per_node = [
+                    n_process_per_rank = get_nproc_per_rank(self.ep_rank, device)
+                    assert self.num_ep_ranks == len(n_process_per_rank)
+                    n_process = sum(n_process_per_rank)
+                    n_expert_per_rank = [
                         max(1, round(n / n_process * args.moe.num_experts))
-                        for n in n_process_per_node
+                        for n in n_process_per_rank
                     ]
-                    for i in range(args.moe.num_experts - sum(n_expert_per_node)):
-                        n_expert_per_node[-i - 1] += 1
+                    for i in range(args.moe.num_experts - sum(n_expert_per_rank)):
+                        n_expert_per_rank[-i - 1] += 1
 
-                    self.n_expert = n_expert_per_node[self.ep_rank]
-                    self.expert_off = sum(n_expert_per_node[: self.ep_rank])
+                    self.n_expert = n_expert_per_rank[self.ep_rank]
+                    self.expert_off = sum(n_expert_per_rank[: self.ep_rank])
 
-                    local_rank = dist.get_rank() - sum(
-                        n_process_per_node[: self.ep_rank]
+                    ep_local_rank = dist.get_rank() - sum(
+                        n_process_per_rank[: self.ep_rank]
                     )
-                    local_world_size = n_process_per_node[self.ep_rank]
-                    remainder = args.hidden_dim % local_world_size
-                    self.ep_hidden_dim = args.hidden_dim // local_world_size
-                    self.ep_hidden_dim_off = local_rank * self.ep_hidden_dim
-                    if local_world_size - local_rank <= remainder:
+                    ep_local_world_size = n_process_per_rank[self.ep_rank]
+                    remainder = args.hidden_dim % ep_local_world_size
+                    self.ep_hidden_dim = args.hidden_dim // ep_local_world_size
+                    self.ep_hidden_dim_off = ep_local_rank * self.ep_hidden_dim
+                    if ep_local_world_size - ep_local_rank <= remainder:
                         self.ep_hidden_dim += 1
                         self.ep_hidden_dim_off += remainder - (
-                            local_world_size - local_rank
+                            ep_local_world_size - ep_local_rank
                         )
 
                 # for i in range(dist.get_world_size()):
                 #     if i == dist.get_rank():
-                #         print(i, self.expert_off, self.n_expert, self.ep_hidden_dim)
+                #         print(
+                #             i,
+                #             self.expert_off,
+                #             self.n_expert,
+                #             self.ep_hidden_dim_off,
+                #             self.ep_hidden_dim,
+                #         )
                 #     dist.barrier()
                 # dist.destroy_process_group()
                 # exit()
@@ -206,9 +225,9 @@ class Transformer(ModelBase, LoRALoaderMixin):
             else:
                 offset = self.pipeline_rank * num_layers_per_rank
                 end = offset + num_layers_per_rank
-        else:  # "PP + TP/EP"
-            assert n_process_per_node != None
-            n_process = sum(n_process_per_node)
+        else:  # inter-node PP
+            n_process_per_node = get_nproc_per_rank(self.pipeline_rank, device)
+            n_process = sum(n_process_per_node)  # == world_size
             n_layers_per_node = [
                 round(n / n_process * self.n_layers) for n in n_process_per_node
             ]
@@ -383,7 +402,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
                             self.expert_off <= expert_id
                             and expert_id < self.expert_off + self.n_expert
                         ):
-                            if self.ep_hidden_dim_off:
+                            if self.ep_hidden_dim_off != None:
                                 if k.endswith("w1.weight") or k.endswith("w3.weight"):
                                     v = v[
                                         self.ep_hidden_dim_off : self.ep_hidden_dim_off
@@ -467,13 +486,11 @@ class Transformer(ModelBase, LoRALoaderMixin):
     def from_folder(
         folder: Union[Path, str],
         max_batch_size: int = 1,
-        node_rank: int = 0,
         pipeline_rank: int = 0,
         num_pipeline_ranks: int = 1,
         tp_rank: int = 0,
         num_tp_ranks: int = 1,
         tp_gorup: dist.distributed_c10d.ProcessGroup = None,
-        n_process_per_node: list = None,
         ep_rank: int = None,
         num_ep_ranks: int = None,
         device: Union[torch.device, str] = "cuda",
@@ -503,33 +520,6 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 config["vocab_size"] = config_["vocab_size"]
                 model_args = TransformerArgs.from_dict(config)
 
-        if num_ep_ranks:
-            assert model_args.moe != None
-            assert ep_rank < num_ep_ranks
-            assert num_ep_ranks <= model_args.moe.num_experts
-            assert num_pipeline_ranks > 1 or num_tp_ranks == dist.get_world_size()
-
-            if num_pipeline_ranks == 1 and num_ep_ranks < model_args.moe.num_experts:
-                gather_tensor = torch.empty(
-                    dist.get_world_size(), dtype=torch.int, device=device
-                )
-                dist.all_gather_into_tensor(
-                    gather_tensor,
-                    torch.tensor([node_rank], dtype=torch.int, device=device),
-                )
-                n_process_per_node = torch.unique(gather_tensor, return_counts=True)[
-                    1
-                ].tolist()
-                if len(n_process_per_node) > 1:
-                    ep_rank, acc = None, 0
-                    for i, n_proc in enumerate(n_process_per_node):
-                        acc += n_proc
-                        if acc > dist.get_rank():
-                            ep_rank = i
-                            break
-                    assert ep_rank != None
-                    num_ep_ranks = len(n_process_per_node)
-
         model_args.max_batch_size = max_batch_size
         with torch.device("meta"):
             model = Transformer(
@@ -539,10 +529,10 @@ class Transformer(ModelBase, LoRALoaderMixin):
                 tp_rank=tp_rank,
                 num_tp_ranks=num_tp_ranks,
                 tp_group=tp_gorup,
-                n_process_per_node=n_process_per_node,
                 ep_rank=ep_rank,
                 num_ep_ranks=num_ep_ranks,
                 softmax_fp32=softmax_fp32,
+                device=device,
             )
 
         pt_model_file = Path(folder) / "consolidated.00.pth"

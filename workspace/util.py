@@ -105,3 +105,12 @@ def get_sampling_logits(logits: torch.Tensor, top_p: float, T: float, replicate=
         indices_to_remove = filter.scatter(-1, sorted_indices, filter)
         logits[indices_to_remove] = float("-inf")
     return logits
+
+
+def get_nnodes(node_rank: int, device: torch.device):
+    gather_tensor = torch.empty(dist.get_world_size(), dtype=torch.int, device=device)
+    dist.all_gather_into_tensor(
+        gather_tensor,
+        torch.tensor([node_rank], dtype=torch.int, device=device),
+    )
+    return torch.unique(gather_tensor).shape[0]
