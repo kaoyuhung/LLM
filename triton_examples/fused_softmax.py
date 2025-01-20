@@ -5,7 +5,7 @@ import time
 from triton.runtime import driver
 
 
-def timed(fn, *args, n_warmup=3, verbose=False, **kwargs):
+def timed(fn, *args, n_warmup=3, n_times=5, verbose=False, **kwargs):
     for _ in range(n_warmup):
         if verbose and _ == n_warmup - 1:
             kwargs["verbose"] = True
@@ -15,10 +15,12 @@ def timed(fn, *args, n_warmup=3, verbose=False, **kwargs):
 
     t = time.time()
     torch.cuda.synchronize(args[0].device)
-    result = fn(*args, **kwargs)
+    for _ in range(n_times):
+        result = fn(*args, **kwargs)
     torch.cuda.synchronize(args[0].device)
+    t = (time.time() - t) / 5
 
-    return result, (time.time() - t) * 1000
+    return result, t * 1000
 
 
 def is_hip():
@@ -69,6 +71,7 @@ def softmax_kernel(
     # starting row of the program
     row_start = tl.program_id(0)
     row_step = tl.num_programs(0)
+
     for row_idx in tl.range(row_start, n_rows, row_step, num_stages=num_stages):
         # The stride represents how much we need to increase the pointer to advance 1 row
         row_start_ptr = input_ptr + row_idx * input_row_stride
@@ -135,6 +138,7 @@ def softmax(x, properties, verbose=False):
         print(f"NUM_REGS = {NUM_REGS}")
         print(f"SIZE_SMEM = {SIZE_SMEM}")
         print(f"WARP_SIZE = {WARP_SIZE}")
+        print(f"BLOCK_SIZE = {BLOCK_SIZE}")
         print(f"N_WARPS = {num_warps}")
         print(f"KERNEL_NREGS = {n_regs}")
         print(f"KERNEL_SMEM = {size_smem}")
@@ -178,6 +182,9 @@ if __name__ == "__main__":
 
     batch_size, dim = 128, 4096
     x = torch.randn(batch_size, dim, device=device)
+
+    y_torch, t = timed(naive_softmax, x)
+    print(f"naive_softmax: {t} ms")
 
     y_torch, t = timed(torch.softmax, x, axis=1)
     print(f"torch.softmax: {t} ms")

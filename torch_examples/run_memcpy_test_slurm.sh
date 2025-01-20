@@ -10,11 +10,19 @@
 #SBATCH --job-name=INFERENCE
 #SBATCH --output=result/job%j/log.out
 
+if [ $# -lt 2 ]; then
+  echo "Usage: $0 <nccl> <nsys>"
+  exit 1
+fi
+
+nccl=$1
+nsys=$2
+
 if [ "$SLURM_JOB_NUM_NODES" -eq 1 ]; then
-    if [ ! -z "$1" ] && [ "$1" = "1" ]; then
-        SRUN_CMD="python3 test_memcpy.py"
+    if [ ! -z "$nccl" ] && [ "$nccl" = "0" ]; then
+        SRUN_CMD="./run_memcpy_test.sh 0 $nsys"
     else
-        SRUN_CMD="./run_memcpy_test.sh $SLURM_JOB_NUM_NODES $SLURM_CPUS_PER_GPU"
+        SRUN_CMD="./run_memcpy_test.sh 1 $nsys $SLURM_CPUS_PER_GPU"
     fi
 else
     export UCX_NET_DEVICES=mlx5_0:1
@@ -24,7 +32,7 @@ else
     head_node=${nodes_array[0]}
     MASTER_ADDR=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
     MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
-    SRUN_CMD="./run_memcpy_test.sh $SLURM_JOB_NUM_NODES $SLURM_GPUS_PER_NODE xxx $MASTER_ADDR:$MASTER_PORT"
+    SRUN_CMD="./run_memcpy_test.sh $SLURM_JOB_NUM_NODES $nsys $SLURM_GPUS_PER_NODE xxx $MASTER_ADDR:$MASTER_PORT"
 fi
 
 # https://discuss.pytorch.org/t/distributed-training-on-slurm-cluster/150417/8
