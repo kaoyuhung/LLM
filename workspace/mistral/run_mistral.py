@@ -394,7 +394,7 @@ def run_default(
                 eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
             )
 
-        out_tokens, _ = nsys_profile_generate(
+        nsys_profile_generate(
             [prompts[0]],
             tokenizer,
             model,

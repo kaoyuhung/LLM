@@ -1,19 +1,21 @@
 #!/bin/bash
 
 if [ $# -lt 4 ]; then
-  echo "Usage: $0 <mode> <eval_nItrs> <model> <model_path> [<output_dir>]"
+  echo "Usage: $0 <mode> <eval_nItrs> <model> <model_path>"
   exit 1
 fi
 mode=$1
 eval_nItrs=$2
 model=$3
 model_path=$4
-if [ ! -z "$5" ]; then
-  output_folder=$5
+
+if [ ! -z "$SLURM_NODEID" ]; then
+  output_folder="result/job${SLURM_JOB_ID}"
 else
   output_folder="result"
 fi
 output_file="${mode}_${model}_single_gpu.txt"
+
 
 mkdir -p $output_folder
 if [ -e "$output_folder/$output_file" ]; then
@@ -29,8 +31,11 @@ if [ $mode = "measure" ]; then
   done
 
 elif [ $mode = "nsys_profile" ]; then
-    nsys profile --cudabacktrace=true --capture-range=cudaProfilerApi --capture-range-end=stop --sample=none -f true -o $output_folder/$output_file \
-      $CMD --max_tokens 5
+    nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop --sample=none \
+      --cuda-memory-usage=true \
+      --python-backtrace=cuda --trace-fork-before-exec=true \
+      -f true -o $output_folder/$output_file \
+      $CMD --max_tokens 5 --batch_size 128
 
 elif [ $mode = "profile" ]; then
   $CMD

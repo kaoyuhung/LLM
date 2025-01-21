@@ -238,7 +238,7 @@ class Transformer(ModelBase, LoRALoaderMixin):
 
         # for i in range(dist.get_world_size()):
         #     if i == dist.get_rank():
-        #         print(i, offset, end)
+        #         print(i, offset, end, self.tp_rank, self.num_tp_ranks)
         #     dist.barrier()
         # dist.destroy_process_group()
         # exit()
@@ -353,6 +353,64 @@ class Transformer(ModelBase, LoRALoaderMixin):
         if self.pipeline_rank < self.num_pipeline_ranks - 1:
             # ignore the intermediate activations as we'll get the final output from
             # the last stage
+            outs = torch.empty(
+                h.shape[0], self.vocab_size, device=h.device, dtype=h.dtype
+            )
+        else:
+            outs = self.output(h)
+
+        if self.num_pipeline_ranks > 1:
+            dist.broadcast(outs, src=dist.get_world_size() - 1)
+
+        if self.softmax_fp32:
+            return outs.float()
+        else:
+            return outs
+
+    def forward_profile(
+        self,
+        input_ids: torch.Tensor,
+        seqlens: List[int],
+        cache: Optional[BufferCache] = None,
+    ) -> torch.Tensor:
+
+        (num_toks,) = input_ids.shape
+
+        if self.pipeline_rank == 0:
+            h = self.tok_embeddings(input_ids)
+
+        else:
+            h = torch.empty(
+                num_toks, self.args.dim, device=self.device, dtype=self.dtype
+            )
+            if self.tp_rank == 0:
+                dist.batch_isend_irecv(
+                    [dist.P2POp(dist.irecv, h, dist.get_rank() - 1)]
+                )[0].wait()
+            if self.num_tp_ranks > 1:
+                dist.broadcast(
+                    h, src=dist.get_rank() - self.tp_rank, group=self.tp_group
+                )
+
+        cache_metadata = cache.get_input_metadata(seqlens)
+        freqs_cis = self.freqs_cis[cache_metadata.positions]
+        for local_layer_id, layer in enumerate(self.layers.values()):
+            torch.cuda.nvtx.range_push(f"layer {local_layer_id}")
+            cache_view = cache.get_view(local_layer_id, cache_metadata)
+            h = layer(h, freqs_cis, cache_view)
+            torch.cuda.nvtx.range_pop()
+
+        cache.update_seqlens(seqlens)
+
+        if self.pipeline_rank < self.num_pipeline_ranks - 1:
+            if self.tp_rank == self.num_tp_ranks - 1:
+                dist.batch_isend_irecv(
+                    [dist.P2POp(dist.isend, h, dist.get_rank() + 1)]
+                )[0].wait()
+        else:
+            h = self.norm(h)  # type: ignore
+
+        if self.pipeline_rank < self.num_pipeline_ranks - 1:
             outs = torch.empty(
                 h.shape[0], self.vocab_size, device=h.device, dtype=h.dtype
             )

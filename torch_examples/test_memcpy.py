@@ -6,7 +6,7 @@ import argparse
 
 
 def test_intra_node(nsys: bool):
-    tensor = torch.rand(16, 4096, 14336, dtype=torch.bfloat16)
+    tensor = torch.rand(4, 4096, 14336, dtype=torch.bfloat16)
     memory_size_in_bytes = tensor.element_size() * tensor.numel()
     print(f"tensor size: {memory_size_in_bytes / 2**20} MB")
 
@@ -26,25 +26,28 @@ def test_intra_node(nsys: bool):
         elapsed_time = (time.time() - t) / 5
         throughput = (memory_size_in_bytes / 2**30) / elapsed_time
         print(
-            f"Memcpy from CPU to GPU{i}: Lantency={elapsed_time:.4f} ms, Throughput={throughput:.4f} GB/s"
+            f"Memcpy from CPU to GPU{i}: Latency={elapsed_time:.4f} s, Throughput={throughput:.4f} GB/s"
         )
 
         for j in range(0, torch.cuda.device_count()):
             if i == j:
                 continue
-            device = torch.device(f"cuda:{j}")
+            deviceTo = torch.device(f"cuda:{j}")
 
             for _ in range(3):
-                gpu_tensor.to(device)
+                gpu_tensor.to(deviceTo)
+                torch.cuda.synchronize(device=device)
+                torch.cuda.synchronize(device=deviceTo)
 
             t = time.time()
             for _ in range(5):
-                gpu_tensor.to(device)
+                gpu_tensor.to(deviceTo)
                 torch.cuda.synchronize(device=device)
+                torch.cuda.synchronize(device=deviceTo)
             elapsed_time = (time.time() - t) / 5
             throughput = (memory_size_in_bytes / 2**30) / elapsed_time
             print(
-                f"Memcpy from GPU{i} to GPU{j}: Lantency={elapsed_time:.4f} s, Throughput={throughput:.4f} GB/s"
+                f"Memcpy from GPU{i} to GPU{j}: Latency={elapsed_time:.4f} s, Throughput={throughput:.4f} GB/s"
             )
 
     if nsys:
@@ -88,7 +91,7 @@ def test_inter_node(nsys: bool):
 
                 throughput = (memory_size_in_bytes / 2**30) / elapsed_time
                 print(
-                    f"NCCL SendRecv from GPU{i} to GPU{j}: Lantency={elapsed_time:.4f} s, Throughput={throughput:.4f} GB/s"
+                    f"NCCL SendRecv from GPU{i} to GPU{j}: Latency={elapsed_time:.4f} s, Throughput={throughput:.4f} GB/s"
                 )
 
             if j == WORLD_RANK:
@@ -106,7 +109,7 @@ def test_inter_node(nsys: bool):
     throughput = (memory_size_in_bytes / 2**30) / elapsed_time
     if LOCAL_RANK == 0:
         print(
-            f"NCCL Allreduce: Lantency={elapsed_time:.4f} s, Throughput={throughput:.4f} GB/s"
+            f"NCCL Allreduce: Latency={elapsed_time:.4f} s, Throughput={throughput:.4f} GB/s"
         )
 
     tensor_list = [torch.empty_like(tensor) for _ in range(WORLD_SIZE)]
@@ -118,7 +121,7 @@ def test_inter_node(nsys: bool):
     throughput = (memory_size_in_bytes / 2**30) / elapsed_time
     if LOCAL_RANK == 0:
         print(
-            f"NCCL Allgather: Lantency={elapsed_time:.4f} s, Throughput={throughput:.4f} GB/s"
+            f"NCCL Allgather: Latency={elapsed_time:.4f} s, Throughput={throughput:.4f} GB/s"
         )
 
     shape = list(tensor.shape)
@@ -132,9 +135,10 @@ def test_inter_node(nsys: bool):
     throughput = (memory_size_in_bytes / 2**30) / elapsed_time
     if LOCAL_RANK == 0:
         print(
-            f"NCCL Allgather_into_tensor: Lantency={elapsed_time:.4f} s, Throughput={throughput:.4f} GB/s"
+            f"NCCL Allgather_into_tensor: Latency={elapsed_time:.4f} s, Throughput={throughput:.4f} GB/s"
         )
 
+    dist.barrier()
     dist.destroy_process_group()
 
     if nsys:

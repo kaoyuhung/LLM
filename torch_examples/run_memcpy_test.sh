@@ -69,9 +69,13 @@ if [ "$nnodes" -eq 0 ]; then
   CMD="python3 ./test_memcpy.py --nsys $nsys" 
 
 elif [ "$nnodes" -eq 1 ]; then
+  export NCCL_DEBUG="INFO"
+  export NCCL_IGNORE_DISABLED_P2P=1
   CMD="torchrun --standalone --nnodes=1 --nproc-per-node=$gpus ./test_memcpy.py --nsys $nsys"
   
 else
+  export NCCL_DEBUG="INFO"
+  export NCCL_IGNORE_DISABLED_P2P=1
   CMD="torchrun --nnodes=$nnodes --nproc-per-node=$gpus --node-rank=$node_rank --master-addr=$master_addr --master-port=$master_port ./test_memcpy.py --nsys $nsys"
  
 fi

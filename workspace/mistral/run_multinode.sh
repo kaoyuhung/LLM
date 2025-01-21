@@ -50,8 +50,11 @@ if [ $mode = "measure" ]; then
   done
 
 elif [ $mode = "nsys_profile" ]; then
-  nsys profile --cudabacktrace=true --capture-range=cudaProfilerApi --capture-range-end=stop --sample=none -f true -o $output_folder/$output_file \
-    $CMD --max_tokens 5
+  nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop --sample=none \
+    --cuda-memory-usage=true \
+    --python-backtrace=cuda --trace-fork-before-exec=true \
+    -f true -o $output_folder/$output_file \
+    $CMD --max_tokens 5 --batch_size 128
 
 elif [ $mode = "profile" ]; then
   $CMD
