@@ -17,6 +17,11 @@ def draw_throughput(folder):
             approach = file.split("_")[-3]
         else:
             approach = file.split("_")[-2]
+            if "node" in approach:
+                if approach == "node0":
+                    approach = file.split("_")[-3]
+                else:
+                    continue
 
         prefill_y, decode_y = [], []
         file_path = os.path.join(folder, file)
@@ -58,55 +63,7 @@ def draw_throughput(folder):
                     linewidth=1.5,
                     marker="o",
                 )
-        # ax.plot(
-        #     x[: len(y["v1"])],
-        #     y["v1"],
-        #     label="v1",
-        #     linewidth=1.5,
-        #     marker="o",
-        # )
-        # ax.plot(
-        #     x[: len(y["v2"])],
-        #     y["v2"],
-        #     label="v2",
-        #     linewidth=1.5,
-        #     marker="o",
-        # )
-        # ax.plot(
-        #     x[: len(y["PP"])],
-        #     y["PP"],
-        #     label="PP",
-        #     linewidth=1.5,
-        #     marker="o",
-        # )
-        # ax.plot(
-        #     x[: len(y["TP"])],
-        #     y["TP"],
-        #     label="TP",
-        #     linewidth=1.5,
-        #     marker="o",
-        # )
-        # ax.plot(
-        #     x[: len(y["EP"])],
-        #     y["EP"],
-        #     label="EP",
-        #     linewidth=1.5,
-        #     marker="o",
-        # )
-        # ax.plot(
-        #     x[: len(y["PP+TP"])],
-        #     y["PP+TP"],
-        #     label="PP+TP",
-        #     linewidth=1.5,
-        #     marker="o",
-        # )
-        # ax.plot(
-        #     x[: len(y["PP+EP"])],
-        #     y["PP+EP"],
-        #     label="PP+EP",
-        #     linewidth=1.5,
-        #     marker="o",
-        # )
+
         ax.set_xlabel("Batch Size")
         ax.set_ylabel("Throughput (tokens/s)")
         ax.legend()
