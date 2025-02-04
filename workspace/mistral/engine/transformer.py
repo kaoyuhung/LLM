@@ -4,6 +4,11 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Union
+import sys
+
+sys.path.append("..")
+from util import get_nproc_per_rank
+
 import torch
 import torch.distributed as dist
 import safetensors.torch
@@ -18,15 +23,6 @@ from engine.cache import BufferCache, CacheInputMetadata
 from engine.transformer_layers import RMSNorm, TransformerBlock
 from engine.transformer_layers_tp import TransformerBlockTP
 from engine.transformer_layers_ep import TransformerBlockEP
-
-
-def get_nproc_per_rank(rank: int, device: torch.device):
-    gather_tensor = torch.empty(dist.get_world_size(), dtype=torch.int, device=device)
-    dist.all_gather_into_tensor(
-        gather_tensor,
-        torch.tensor([rank], dtype=torch.int, device=device),
-    )
-    return torch.unique(gather_tensor, return_counts=True)[1].tolist()
 
 
 @dataclass

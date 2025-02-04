@@ -5,6 +5,15 @@ import torch.distributed as dist
 import numpy as np
 
 
+def get_nproc_per_rank(rank: int, device: torch.device):
+    gather_tensor = torch.empty(dist.get_world_size(), dtype=torch.int, device=device)
+    dist.all_gather_into_tensor(
+        gather_tensor,
+        torch.tensor([rank], dtype=torch.int, device=device),
+    )
+    return torch.unique(gather_tensor, return_counts=True)[1].tolist()
+
+
 def setup_seed(seed):
     torch.manual_seed(seed)  # generating random numbers in PyTorch on the CPU and GPU
     torch.cuda.manual_seed_all(seed)  # generating random numbers on all available GPUs
@@ -114,3 +123,25 @@ def get_nnodes(node_rank: int, device: torch.device):
         torch.tensor([node_rank], dtype=torch.int, device=device),
     )
     return torch.unique(gather_tensor).shape[0]
+
+
+def sample(logits: torch.Tensor, temperature: float, top_p: float) -> torch.Tensor:
+    if temperature > 0:
+        probs = torch.softmax(logits / temperature, dim=-1)
+        next_token = sample_top_p(probs, top_p)
+    else:
+        next_token = torch.argmax(logits, dim=-1).unsqueeze(0)
+
+    return next_token.reshape(-1)
+
+
+def sample_top_p(probs: torch.Tensor, p: float) -> torch.Tensor:
+    assert 0 <= p <= 1
+
+    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+    probs_sum = torch.cumsum(probs_sort, dim=-1)
+    mask = probs_sum - probs_sort > p
+    probs_sort[mask] = 0.0
+    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
+    next_token = torch.multinomial(probs_sort, num_samples=1)
+    return torch.gather(probs_idx, -1, next_token)

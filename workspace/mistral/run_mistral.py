@@ -732,13 +732,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--eval_nItrs", type=int, default=1)
     parser.add_argument("--warmup_iters", type=int, default=1)
-    parser.add_argument("--node-id", type=int)
     parser.add_argument("--batch_size", type=int, default=1)
-    dtype_map = {
-        "f16": torch.float16,
-        "bf16": torch.bfloat16,
-    }
-    parser.add_argument("--dtype", type=str, default="bf16", choices=dtype_map.keys())
+    parser.add_argument(
+        "--dtype", type=str, default="bfloat16", choices=["float16", "bfloat16"]
+    )
     parser.add_argument("--torch_compile", type=eval, default=False)
     parser.add_argument(
         "--model_version",
@@ -788,7 +785,7 @@ if __name__ == "__main__":
             args.prompt_path,
             args.batch_size,
             device,
-            dtype_map[args.dtype],
+            getattr(torch, args.dtype),
             args.model_version,
         )
         dist.destroy_process_group()
@@ -806,6 +803,6 @@ if __name__ == "__main__":
             args.eval_nItrs,
             args.warmup_iters,
             args.batch_size,
-            dtype_map[args.dtype],
+            getattr(torch, args.dtype),
             args.torch_compile,
         )
