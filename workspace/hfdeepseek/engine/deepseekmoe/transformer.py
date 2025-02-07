@@ -123,6 +123,11 @@ from engine.deepseekmoe.transformer_layers import (
     logger,
     _CONFIG_FOR_DOC,
 )
+from engine.deepseekmoe.transformer_layers_tp import (
+    ParallelEmbedding,
+    DeepseekDecoderLayerTP,
+    ColumnParallelLinear,
+)
 
 Deepseek_START_DOCSTRING = r"""
     This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
@@ -252,10 +257,11 @@ class DeepseekModel(DeepseekPreTrainedModel):
     def __init__(
         self,
         config: DeepseekConfig,
-        layer_start_idx: int,
-        layer_end_idx: int,
         pipeline_rank: int = 0,
         num_pipeline_ranks: int = 1,
+        tp_rank: int = 0,
+        num_tp_ranks: int = 1,
+        tp_group: Optional[dist.distributed_c10d.ProcessGroup] = None,
     ):
         super().__init__(config)
         self.hidden_size = config.hidden_size
@@ -263,20 +269,43 @@ class DeepseekModel(DeepseekPreTrainedModel):
         self.vocab_size = config.vocab_size
         self.pipeline_rank = pipeline_rank
         self.num_pipeline_ranks = num_pipeline_ranks
+        self.tp_rank = tp_rank
+        self.num_tp_ranks = num_tp_ranks
+        self.tp_group = tp_group
 
         if self.pipeline_rank == 0:
-            self.embed_tokens = nn.Embedding(
-                config.vocab_size, config.hidden_size, self.padding_idx
-            )
+            if self.num_tp_ranks == 1:
+                self.embed_tokens = nn.Embedding(
+                    config.vocab_size, config.hidden_size, self.padding_idx
+                )
+            else:
+                self.embed_tokens = ParallelEmbedding(
+                    config.tp_vocab_size,
+                    config.hidden_size,
+                    config.vocab_start_idx,
+                    config.vocab_end_idx,
+                    self.padding_idx,
+                    self.tp_group,
+                )
         else:
             self.embed_tokens: Optional[nn.Embedding] = None
 
-        layers = [
-            DeepseekDecoderLayer(config, layer_idx)
-            for layer_idx in range(config.num_hidden_layers)
-        ]
+        if self.num_tp_ranks == 1:
+            layers = [
+                DeepseekDecoderLayer(config, layer_idx)
+                for layer_idx in range(config.num_hidden_layers)
+            ]
+        else:
+            layers = [
+                DeepseekDecoderLayerTP(config, layer_idx, self.tp_group)
+                for layer_idx in range(config.num_hidden_layers)
+            ]
+
         self.layers = nn.ModuleDict(
-            {str(i): layers[i] for i in range(layer_start_idx, layer_end_idx)}
+            {
+                str(i): layers[i]
+                for i in range(config.layer_start_idx, config.layer_end_idx)
+            }
         )
         # self.layers = nn.ModuleList(
         #     [
@@ -367,15 +396,24 @@ class DeepseekModel(DeepseekPreTrainedModel):
 
         if inputs_embeds is None and self.pipeline_rank == 0:
             inputs_embeds = self.embed_tokens(input_ids)
+
         else:
             inputs_embeds = torch.empty(
                 input_ids.shape + (self.hidden_size,),
                 device=self.device,
                 dtype=self.dtype,
             )
-            dist.batch_isend_irecv(
-                [dist.P2POp(dist.irecv, inputs_embeds, dist.get_rank() - 1)]
-            )[0].wait()
+            if self.tp_rank == 0:
+                dist.batch_isend_irecv(
+                    [dist.P2POp(dist.irecv, inputs_embeds, dist.get_rank() - 1)]
+                )[0].wait()
+
+            if self.num_tp_ranks > 1:
+                dist.broadcast(
+                    inputs_embeds,
+                    src=dist.get_rank() - self.tp_rank,
+                    group=self.tp_group,
+                )
 
         if self._use_flash_attention_2:
             # 2d mask is passed through the layers
@@ -443,9 +481,11 @@ class DeepseekModel(DeepseekPreTrainedModel):
                 all_self_attns += (layer_outputs[1],)
 
         if self.pipeline_rank < self.num_pipeline_ranks - 1:
-            dist.batch_isend_irecv(
-                [dist.P2POp(dist.isend, hidden_states, dist.get_rank() + 1)]
-            )[0].wait()
+            if self.tp_rank == self.num_tp_ranks - 1:
+                dist.batch_isend_irecv(
+                    [dist.P2POp(dist.isend, hidden_states, dist.get_rank() + 1)]
+                )[0].wait()
+
         else:
             hidden_states = self.norm(hidden_states)
 
@@ -493,7 +533,9 @@ class Transformer(DeepseekPreTrainedModel):
         num_pipeline_ranks: int = 1,
         tp_rank: int = 0,
         num_tp_ranks: int = 1,
-        tp_gorup: dist.distributed_c10d.ProcessGroup = None,
+        ep_rank: Optional[int] = None,
+        num_ep_ranks: Optional[int] = None,
+        tp_group: dist.distributed_c10d.ProcessGroup = None,
     ):
         super().__init__(config)
         self.vocab_size = config.vocab_size
@@ -502,10 +544,16 @@ class Transformer(DeepseekPreTrainedModel):
         assert self.pipeline_rank < self.num_pipeline_ranks
         self.tp_rank = tp_rank
         self.num_tp_ranks = num_tp_ranks
-        self.tp_group = tp_gorup
         assert self.tp_rank < self.num_tp_ranks
         if self.num_tp_ranks > 1:
-            assert self.tp_group != None
+            assert tp_group != None
+        self.ep_rank = ep_rank
+        self.num_ep_ranks = num_ep_ranks
+        if self.num_ep_ranks:
+            assert self.num_ep_ranks > 1
+            assert self.ep_rank < self.num_ep_ranks
+            assert self.num_tp_ranks > 1
+            assert self.num_ep_ranks <= config.n_routed_experts
 
         if (
             self.num_pipeline_ranks == 1
@@ -514,13 +562,13 @@ class Transformer(DeepseekPreTrainedModel):
             num_layers_per_rank = config.num_hidden_layers // self.num_pipeline_ranks
             remainder = config.num_hidden_layers % self.num_pipeline_ranks
             if self.num_pipeline_ranks - self.pipeline_rank <= remainder:
-                self.layer_start_idx = self.pipeline_rank * num_layers_per_rank + (
+                layer_start_idx = self.pipeline_rank * num_layers_per_rank + (
                     remainder - (self.num_pipeline_ranks - self.pipeline_rank)
                 )
-                self.layer_end_idx = self.layer_start_idx + num_layers_per_rank + 1
+                layer_end_idx = layer_start_idx + num_layers_per_rank + 1
             else:
-                self.layer_start_idx = self.pipeline_rank * num_layers_per_rank
-                self.layer_end_idx = self.layer_start_idx + num_layers_per_rank
+                layer_start_idx = self.pipeline_rank * num_layers_per_rank
+                layer_end_idx = layer_start_idx + num_layers_per_rank
         else:  # inter-node PP
             n_process_per_node = get_nproc_per_rank(self.pipeline_rank, device)
             n_process = sum(n_process_per_node)  # == world_size
@@ -530,29 +578,206 @@ class Transformer(DeepseekPreTrainedModel):
             ]
             for i in range(n_process - sum(n_layers_per_node)):
                 n_layers_per_node[-i - 1] += 1
-            self.layer_start_idx = sum(n_layers_per_node[: self.pipeline_rank])
-            self.layer_end_idx = (
-                self.layer_start_idx + n_layers_per_node[self.pipeline_rank]
-            )
+            layer_start_idx = sum(n_layers_per_node[: self.pipeline_rank])
+            layer_end_idx = layer_start_idx + n_layers_per_node[self.pipeline_rank]
+
+        config.layer_start_idx = layer_start_idx
+        config.layer_end_idx = layer_end_idx
 
         # for i in range(dist.get_world_size()):
         #     if i == dist.get_rank():
-        #         print(i, self.layer_start_idx, self.layer_end_idx, self.tp_rank, self.num_tp_ranks)
+        #         print(
+        #             i,
+        #             layer_start_idx,
+        #             layer_end_idx,
+        #             self.tp_rank,
+        #             self.num_tp_ranks,
+        #         )
         #     dist.barrier()
         # dist.destroy_process_group()
         # exit()
 
-        if self.num_tp_ranks == 1:
-            self.model = DeepseekModel(
-                config,
-                layer_start_idx=self.layer_start_idx,
-                layer_end_idx=self.layer_end_idx,
-                pipeline_rank=pipeline_rank,
-                num_pipeline_ranks=num_pipeline_ranks,
-            )
+        if self.num_tp_ranks > 1:
+
+            # Split Vocabulary Size
+            remainder = config.vocab_size % self.num_tp_ranks
+            tp_vocab_size = config.vocab_size // self.num_tp_ranks
+            tp_vocab_start_idx = self.tp_rank * tp_vocab_size
+            if self.num_tp_ranks - self.tp_rank <= remainder:
+                tp_vocab_size += 1
+                tp_vocab_start_idx += remainder - (self.num_tp_ranks - self.tp_rank)
+            tp_vocal_end_idx = tp_vocab_start_idx + tp_vocab_size
+            config.tp_vocab_size = tp_vocab_size
+            config.vocab_start_idx = tp_vocab_start_idx
+            config.vocab_end_idx = tp_vocal_end_idx
+
+            # For MLP Layer
+            remainder = config.intermediate_size % self.num_tp_ranks
+            tp_intermediate_size = config.intermediate_size // self.num_tp_ranks
+            dim_start_idx = self.tp_rank * tp_intermediate_size
+            if self.num_tp_ranks - self.tp_rank <= remainder:
+                tp_intermediate_size += 1
+                dim_start_idx += remainder - (self.num_tp_ranks - self.tp_rank)
+            dim_end_idx = dim_start_idx + tp_intermediate_size
+            config.intermediate_size = tp_intermediate_size
+            config.dim_start_idx = dim_start_idx
+            config.dim_end_idx = dim_end_idx
+
+            # For the shared Expert in MoE Layer
+            if config.n_shared_experts is not None:
+                shared_moe_intermediate_size = (
+                    config.moe_intermediate_size * config.n_shared_experts
+                )
+                remainder = shared_moe_intermediate_size % self.num_tp_ranks
+                tp_shared_moe_intermediate_size = (
+                    shared_moe_intermediate_size // self.num_tp_ranks
+                )
+                shared_moe_dim_start_idx = (
+                    self.tp_rank * tp_shared_moe_intermediate_size
+                )
+                if self.num_tp_ranks - self.tp_rank <= remainder:
+                    tp_shared_moe_intermediate_size += 1
+                    shared_moe_dim_start_idx += remainder - (
+                        self.num_tp_ranks - self.tp_rank
+                    )
+                shared_moe_dim_end_idx = (
+                    shared_moe_dim_start_idx + tp_shared_moe_intermediate_size
+                )
+                config.shared_moe_intermediate_size = tp_shared_moe_intermediate_size
+                config.shared_moe_dim_start_idx = shared_moe_dim_start_idx
+                config.shared_moe_dim_end_idx = shared_moe_dim_end_idx
+
+            # For MoE Layer
+            if self.num_ep_ranks:
+                if self.num_ep_ranks == self.num_tp_ranks:  # Pure EP
+                    remainder = config.n_routed_experts % self.num_ep_ranks
+                    n_expert = config.n_routed_experts // self.num_ep_ranks
+                    expert_start_idx = self.ep_rank * n_expert
+                    if self.num_ep_ranks - self.ep_rank <= remainder:
+                        n_expert += 1
+                        expert_start_idx += remainder - (
+                            self.num_ep_ranks - self.ep_rank
+                        )
+                    expert_end_idx = expert_start_idx + n_expert
+                else:  # Inter-node EP + Intra-Node TP
+                    n_process_per_rank = get_nproc_per_rank(self.ep_rank, device)
+                    assert self.num_ep_ranks == len(n_process_per_rank)
+                    n_process = sum(n_process_per_rank)
+                    n_expert_per_rank = [
+                        max(1, round(n / n_process * config.n_routed_experts))
+                        for n in n_process_per_rank
+                    ]
+                    for i in range(config.n_routed_experts - sum(n_expert_per_rank)):
+                        n_expert_per_rank[-i - 1] += 1
+                    n_expert = n_expert_per_rank[self.ep_rank]
+                    expert_start_idx = sum(n_expert_per_rank[: self.ep_rank])
+                    ep_local_rank = dist.get_rank() - sum(
+                        n_process_per_rank[: self.ep_rank]
+                    )
+                    ep_local_world_size = n_process_per_rank[self.ep_rank]
+                    expert_end_idx = expert_start_idx + n_expert_per_rank[self.ep_rank]
+                    remainder = config.moe_intermediate_size % ep_local_world_size
+                    tp_moe_intermediate_size = (
+                        config.moe_intermediate_size // ep_local_world_size
+                    )
+                    moe_dim_start_idx = ep_local_rank * tp_moe_intermediate_size
+                    if ep_local_world_size - ep_local_rank <= remainder:
+                        tp_moe_intermediate_size += 1
+                        moe_dim_start_idx += remainder - (
+                            ep_local_world_size - ep_local_rank
+                        )
+                    moe_dim_end_idx = moe_dim_start_idx + tp_moe_intermediate_size
+                    config.moe_intermediate_size = tp_moe_intermediate_size
+                    config.moe_dim_start_idx = moe_dim_start_idx
+                    config.moe_dim_end_idx = moe_dim_end_idx
+
+                config.expert_start_idx = expert_start_idx
+                config.expert_end_idx = expert_end_idx
+
+                for i in range(dist.get_world_size()):
+                    if i == dist.get_rank():
+                        print(
+                            i,
+                            expert_start_idx,
+                            expert_end_idx,
+                            config.moe_intermediate_size,
+                        )
+                    dist.barrier()
+                dist.destroy_process_group()
+                exit()
+
+            else:
+                remainder = config.moe_intermediate_size % self.num_tp_ranks
+                tp_moe_intermediate_size = (
+                    config.moe_intermediate_size // self.num_tp_ranks
+                )
+                moe_dim_start_idx = self.tp_rank * tp_moe_intermediate_size
+                if self.num_tp_ranks - self.tp_rank <= remainder:
+                    tp_moe_intermediate_size += 1
+                    moe_dim_start_idx += remainder - (self.num_tp_ranks - self.tp_rank)
+                moe_dim_end_idx = moe_dim_start_idx + tp_moe_intermediate_size
+                config.moe_intermediate_size = tp_moe_intermediate_size
+                config.moe_dim_start_idx = moe_dim_start_idx
+                config.moe_dim_end_idx = moe_dim_end_idx
+
+            # For Attn Layer
+            config.head_dim = config.hidden_size // config.num_attention_heads
+            n_heads_per_group = config.num_attention_heads // config.num_key_value_heads
+            remainder = config.num_key_value_heads % self.num_tp_ranks
+            n_kv_heads = config.num_key_value_heads // self.num_tp_ranks
+            kv_heads_start_idx = self.tp_rank * n_kv_heads
+            n_heads = n_kv_heads * n_heads_per_group
+            heads_start_idx = self.tp_rank * n_heads
+            if self.num_tp_ranks - self.tp_rank <= remainder:
+                n_kv_heads += 1
+                kv_heads_start_idx += remainder - (self.num_tp_ranks - self.tp_rank)
+                n_heads += n_heads_per_group
+                heads_start_idx += (
+                    remainder - (self.num_tp_ranks - self.tp_rank)
+                ) * n_heads_per_group
+            kv_heads_end_idx = kv_heads_start_idx + n_kv_heads
+            heads_end_idx = heads_start_idx + n_heads
+            config.num_attention_heads = n_heads
+            config.num_key_value_heads = n_kv_heads
+            config.kv_heads_start_idx = kv_heads_start_idx
+            config.kv_heads_end_idx = kv_heads_end_idx
+            config.heads_start_idx = heads_start_idx
+            config.heads_end_idx = heads_end_idx
+
+            # for i in range(dist.get_world_size()):
+            #     if i == dist.get_rank():
+            #         print(i, tp_vocab_start_idx, tp_vocal_end_idx)
+            #         print(i, dim_start_idx, dim_end_idx)
+            #         print(i, shared_moe_dim_start_idx, shared_moe_dim_end_idx)
+            #         print(i, moe_dim_start_idx, moe_dim_end_idx)
+            #         print(i, heads_start_idx, heads_end_idx)
+            #         print(i, kv_heads_start_idx, kv_heads_end_idx)
+            #     dist.barrier()
+            # dist.destroy_process_group()
+            # exit()
+
+        self.model = DeepseekModel(
+            config,
+            pipeline_rank=pipeline_rank,
+            num_pipeline_ranks=num_pipeline_ranks,
+            tp_rank=self.tp_rank,
+            num_tp_ranks=self.num_tp_ranks,
+            tp_group=tp_group,
+        )
 
         if self.pipeline_rank == self.num_pipeline_ranks - 1:
-            self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+            if self.num_tp_ranks == 1:
+                self.lm_head = nn.Linear(
+                    config.hidden_size, config.vocab_size, bias=False
+                )
+            else:
+                self.lm_head = ColumnParallelLinear(
+                    config.hidden_size,
+                    config.tp_vocab_size,
+                    self.num_tp_ranks,
+                    tp_group,
+                    bias=False,
+                )
         else:
             self.lm_head: Optional[nn.Linear] = None
         # Initialize weights and apply final processing
@@ -1079,7 +1304,9 @@ class Transformer(DeepseekPreTrainedModel):
         num_pipeline_ranks = kwargs.pop("num_pipeline_ranks", 1)
         tp_rank = kwargs.pop("tp_rank", 0)
         num_tp_ranks = kwargs.pop("num_tp_ranks", 1)
-        tp_gorup = kwargs.pop("tp_gorup", None)
+        tp_group = kwargs.pop("tp_group", None)
+        ep_rank = kwargs.pop("ep_rank", None)
+        num_ep_ranks = kwargs.pop("num_ep_ranks", None)
 
         tp_plan = kwargs.pop("tp_plan", None)
         if tp_plan is not None and tp_plan != "auto":
@@ -1887,7 +2114,9 @@ class Transformer(DeepseekPreTrainedModel):
                 num_pipeline_ranks=num_pipeline_ranks,
                 tp_rank=tp_rank,
                 num_tp_ranks=num_tp_ranks,
-                tp_gorup=tp_gorup,
+                tp_group=tp_group,
+                ep_rank=ep_rank,
+                num_ep_ranks=num_ep_ranks,
                 *model_args,
                 **model_kwargs,
             )
@@ -2640,9 +2869,7 @@ class Transformer(DeepseekPreTrainedModel):
                     )
                 state_dict = load_state_dict(
                     shard_file,
-                    model.layer_start_idx,
-                    model.layer_end_idx,
-                    model.config.num_hidden_layers,
+                    model.config,
                     is_quantized=is_quantized,
                     map_location=map_location,
                     weights_only=weights_only,

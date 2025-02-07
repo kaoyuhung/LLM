@@ -13,13 +13,12 @@ from transformers.utils import is_safetensors_available
 from transformers.modeling_utils import is_fsdp_enabled, is_local_dist_rank_0
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.pytorch_utils import is_torch_greater_or_equal_than_1_13
+from engine.configuration_deepseek import DeepseekConfig
 
 
 def load_state_dict(
     checkpoint_file: Union[str, os.PathLike],
-    layer_start_idx: int,
-    layer_end_idx: int,
-    num_hidden_layers: int,
+    config: DeepseekConfig,
     is_quantized: bool = False,
     map_location: Optional[Union[str, torch.device]] = None,
     weights_only: bool = True,
@@ -27,6 +26,27 @@ def load_state_dict(
     """
     Reads a PyTorch checkpoint file, returning properly formatted errors if they arise.
     """
+    layer_start_idx = config.layer_start_idx
+    layer_end_idx = config.layer_end_idx
+    num_hidden_layers = config.num_hidden_layers
+
+    vocab_start_idx = getattr(config, "vocab_start_idx", None)
+    vocab_end_idx = getattr(config, "vocab_end_idx", None)
+    dim_start_idx = getattr(config, "dim_start_idx", None)
+    dim_end_idx = getattr(config, "dim_end_idx", None)
+    shared_moe_dim_start_idx = getattr(config, "shared_moe_dim_start_idx", None)
+    shared_moe_dim_end_idx = getattr(config, "shared_moe_dim_end_idx", None)
+    moe_dim_start_idx = getattr(config, "moe_dim_start_idx", None)
+    moe_dim_end_idx = getattr(config, "moe_dim_end_idx", None)
+    kv_heads_start_idx = getattr(config, "kv_heads_start_idx", None)
+    kv_heads_end_idx = getattr(config, "kv_heads_end_idx", None)
+    heads_start_idx = getattr(config, "heads_start_idx", None)
+    heads_end_idx = getattr(config, "heads_end_idx", None)
+    head_dim = getattr(config, "head_dim", None)
+    n_routed_experts = getattr(config, "n_routed_experts")
+    first_k_dense_replace = getattr(config, "first_k_dense_replace")
+    moe_layer_freq = getattr(config, "moe_layer_freq")
+
     if checkpoint_file.endswith(".safetensors") and is_safetensors_available():
         # Check format of the archive
         state_dict = {}
@@ -50,7 +70,60 @@ def load_state_dict(
                         key == "norm" or key == "lm_head"
                     ) and layer_end_idx != num_hidden_layers:
                         continue
-                state_dict[param_name] = f.get_tensor(param_name)
+
+                param = f.get_tensor(param_name)
+                key = param_name.split(".")[-2]
+                if key == "embed_tokens" and vocab_start_idx != None:
+                    param = param[vocab_start_idx:vocab_end_idx]
+                elif key == "q_proj" and heads_start_idx != None:
+                    param = param[head_dim * heads_start_idx : head_dim * heads_end_idx]
+                elif (
+                    key == "k_proj" or key == "v_proj"
+                ) and kv_heads_start_idx != None:
+                    param = param[
+                        head_dim * kv_heads_start_idx : head_dim * kv_heads_end_idx
+                    ]
+                elif key == "o_proj" and heads_start_idx != None:
+                    param = param[
+                        :, head_dim * heads_start_idx : head_dim * heads_end_idx
+                    ]
+                elif (key == "gate_proj" or key == "up_proj") and dim_start_idx != None:
+                    layer_idx = int(param_name.split(".")[2])
+                    if (
+                        n_routed_experts is not None
+                        and layer_idx >= first_k_dense_replace
+                        and layer_idx % moe_layer_freq == 0
+                    ):
+                        if param_name.split(".")[-3] == "shared_experts":
+                            param = param[
+                                shared_moe_dim_start_idx:shared_moe_dim_end_idx
+                            ]
+                        else:
+                            param = param[moe_dim_start_idx:moe_dim_end_idx]
+                    else:
+                        param = param[dim_start_idx:dim_end_idx]
+
+                elif key == "down_proj" and dim_start_idx != None:
+                    layer_idx = int(param_name.split(".")[2])
+                    if (
+                        n_routed_experts is not None
+                        and layer_idx >= first_k_dense_replace
+                        and layer_idx % moe_layer_freq == 0
+                    ):
+                        if param_name.split(".")[-3] == "shared_experts":
+                            param = param[
+                                :, shared_moe_dim_start_idx:shared_moe_dim_end_idx
+                            ]
+                        else:
+                            param = param[:, moe_dim_start_idx:moe_dim_end_idx]
+                    else:
+                        param = param[:, dim_start_idx:dim_end_idx]
+
+                elif key == "lm_head" and vocab_start_idx != None:
+                    param = param[vocab_start_idx:vocab_end_idx]
+
+                state_dict[param_name] = param
+
         return state_dict
         # return safe_load_file(checkpoint_file)
 
@@ -135,9 +208,6 @@ def getModelandTokenizeer(
     if model_name == "deepseek-moe-16b-chat":
         from engine.deepseekmoe.transformer import Transformer
 
-        # model = Transformer.from_pretrained(
-        #     model_path, torch_dtype=dtype, device_map=device
-        # )
     if model_version == "PP":
         model = Transformer.from_pretrained(
             model_path,
@@ -147,11 +217,56 @@ def getModelandTokenizeer(
             device_map=device,
         )
     elif model_version == "TP":
+        assert world_size > 1
         model = Transformer.from_pretrained(
             model_path,
             tp_rank=world_rank,
             num_tp_ranks=world_size,
-            tp_gorup=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
+            tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
+            torch_dtype=dtype,
+            device_map=device,
+        )
+    elif model_version == "PP+TP":
+        assert nnodes > 1
+        assert local_world_size > 1
+        model = Transformer.from_pretrained(
+            model_path,
+            pipeline_rank=node_rank,
+            num_pipeline_ranks=nnodes,
+            tp_rank=local_rank,
+            num_tp_ranks=local_world_size,
+            tp_group=dist.new_group(
+                ranks=list(
+                    range(
+                        world_rank - local_rank,
+                        world_rank - local_rank + local_world_size,
+                    )
+                ),
+                backend="nccl",
+            ),
+            torch_dtype=dtype,
+            device_map=device,
+        )
+    elif model_version == "EP":
+        model = Transformer.from_pretrained(
+            model_path,
+            tp_rank=world_rank,
+            num_tp_ranks=world_size,
+            tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
+            ep_rank=world_rank,
+            num_ep_ranks=world_size,
+            torch_dtype=dtype,
+            device_map=device,
+        )
+    elif model_version == "TP+EP":
+        assert nnodes > 1
+        model = Transformer.from_pretrained(
+            model_path,
+            tp_rank=world_rank,
+            num_tp_ranks=world_size,
+            tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
+            ep_rank=node_rank,
+            num_ep_ranks=nnodes,
             torch_dtype=dtype,
             device_map=device,
         )
@@ -180,7 +295,7 @@ def getModelandTokenizeer(
     #         num_pipeline_ranks=1,
     #         tp_rank=world_rank,
     #         num_tp_ranks=world_size,
-    #         tp_gorup=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
+    #         tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
     #         device=device,
     #         dtype=dtype,
     #     )
@@ -193,7 +308,7 @@ def getModelandTokenizeer(
     #         num_pipeline_ranks=nnodes,
     #         tp_rank=local_rank,
     #         num_tp_ranks=local_world_size,
-    #         tp_gorup=dist.new_group(
+    #         tp_group=dist.new_group(
     #             ranks=list(
     #                 range(
     #                     world_rank - local_rank,
@@ -214,7 +329,7 @@ def getModelandTokenizeer(
     #         num_pipeline_ranks=1,
     #         tp_rank=world_rank,
     #         num_tp_ranks=world_size,
-    #         tp_gorup=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
+    #         tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
     #         ep_rank=node_rank,
     #         num_ep_ranks=nnodes,
     #         device=device,
@@ -228,7 +343,7 @@ def getModelandTokenizeer(
     #         num_pipeline_ranks=1,
     #         tp_rank=world_rank,
     #         num_tp_ranks=world_size,
-    #         tp_gorup=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
+    #         tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
     #         ep_rank=world_rank,
     #         num_ep_ranks=world_size,
     #         device=device,
@@ -243,7 +358,7 @@ def getModelandTokenizeer(
     #         num_pipeline_ranks=nnodes,
     #         tp_rank=local_rank,
     #         num_tp_ranks=local_world_size,
-    #         tp_gorup=dist.new_group(
+    #         tp_group=dist.new_group(
     #             ranks=list(
     #                 range(
     #                     world_rank - local_rank,
@@ -266,7 +381,7 @@ def getModelandTokenizeer(
     #         num_pipeline_ranks=1,
     #         tp_rank=world_rank,
     #         num_tp_ranks=world_size,
-    #         tp_gorup=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
+    #         tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
     #         ep_rank=0 if world_rank == 0 else 1,
     #         num_ep_ranks=2,
     #         device=device,
@@ -281,7 +396,7 @@ def getModelandTokenizeer(
     #         num_pipeline_ranks=1,
     #         tp_rank=world_rank,
     #         num_tp_ranks=world_size,
-    #         tp_gorup=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
+    #         tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
     #         ep_rank=world_rank // 2,
     #         num_ep_ranks=world_size // 2,
     #         device=device,
