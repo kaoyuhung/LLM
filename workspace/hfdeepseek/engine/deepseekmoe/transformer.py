@@ -128,6 +128,7 @@ from engine.deepseekmoe.transformer_layers_tp import (
     DeepseekDecoderLayerTP,
     ColumnParallelLinear,
 )
+from engine.deepseekmoe.transformer_layers_ep import DeepseekDecoderLayerEP
 
 Deepseek_START_DOCSTRING = r"""
     This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
@@ -262,6 +263,7 @@ class DeepseekModel(DeepseekPreTrainedModel):
         tp_rank: int = 0,
         num_tp_ranks: int = 1,
         tp_group: Optional[dist.distributed_c10d.ProcessGroup] = None,
+        num_ep_ranks: Optional[int] = None,
     ):
         super().__init__(config)
         self.hidden_size = config.hidden_size
@@ -296,11 +298,19 @@ class DeepseekModel(DeepseekPreTrainedModel):
                 for layer_idx in range(config.num_hidden_layers)
             ]
         else:
-            layers = [
-                DeepseekDecoderLayerTP(config, layer_idx, self.tp_group)
-                for layer_idx in range(config.num_hidden_layers)
-            ]
-
+            if num_ep_ranks != None:
+                layers = [
+                    DeepseekDecoderLayerEP(config, layer_idx, self.tp_group)
+                    for layer_idx in range(config.num_hidden_layers)
+                ]
+            else:
+                layers = [
+                    DeepseekDecoderLayerTP(config, layer_idx, self.tp_group)
+                    for layer_idx in range(config.num_hidden_layers)
+                ]
+        # dist.barrier()
+        # dist.destroy_process_group()
+        # exit()
         self.layers = nn.ModuleDict(
             {
                 str(i): layers[i]
@@ -675,7 +685,7 @@ class Transformer(DeepseekPreTrainedModel):
                         n_process_per_rank[: self.ep_rank]
                     )
                     ep_local_world_size = n_process_per_rank[self.ep_rank]
-                    expert_end_idx = expert_start_idx + n_expert_per_rank[self.ep_rank]
+                    expert_end_idx = expert_start_idx + n_expert
                     remainder = config.moe_intermediate_size % ep_local_world_size
                     tp_moe_intermediate_size = (
                         config.moe_intermediate_size // ep_local_world_size
@@ -694,17 +704,17 @@ class Transformer(DeepseekPreTrainedModel):
                 config.expert_start_idx = expert_start_idx
                 config.expert_end_idx = expert_end_idx
 
-                for i in range(dist.get_world_size()):
-                    if i == dist.get_rank():
-                        print(
-                            i,
-                            expert_start_idx,
-                            expert_end_idx,
-                            config.moe_intermediate_size,
-                        )
-                    dist.barrier()
-                dist.destroy_process_group()
-                exit()
+                # for i in range(dist.get_world_size()):
+                #     if i == dist.get_rank():
+                #         print(
+                #             i,
+                #             expert_start_idx,
+                #             expert_end_idx,
+                #             config.moe_intermediate_size,
+                #         )
+                #     dist.barrier()
+                # dist.destroy_process_group()
+                # exit()
 
             else:
                 remainder = config.moe_intermediate_size % self.num_tp_ranks
@@ -763,6 +773,7 @@ class Transformer(DeepseekPreTrainedModel):
             tp_rank=self.tp_rank,
             num_tp_ranks=self.num_tp_ranks,
             tp_group=tp_group,
+            num_ep_ranks=self.num_ep_ranks,
         )
 
         if self.pipeline_rank == self.num_pipeline_ranks - 1:

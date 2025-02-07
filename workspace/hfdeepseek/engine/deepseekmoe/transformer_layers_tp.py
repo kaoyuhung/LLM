@@ -511,14 +511,44 @@ class MoETP(nn.Module):
         )
         self.gate = MoEGate(config)
         if config.n_shared_experts is not None:
-            # intermediate_size = config.moe_intermediate_size * config.n_shared_experts
-            # self.shared_experts = DeepseekMLP(
-            #     config=config, intermediate_size=intermediate_size
-            # )
             assert config.shared_moe_intermediate_size is not None
             self.shared_experts = DeepseekMLP(
                 config=config, intermediate_size=config.shared_moe_intermediate_size
             )
+
+    # def forward(self, hidden_states):
+    #     identity = hidden_states
+    #     orig_shape = hidden_states.shape
+    #     topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
+    #     hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+    #     if self.training:
+    #         flat_topk_idx = topk_idx.view(-1)
+    #         hidden_states = hidden_states.repeat_interleave(
+    #             self.num_experts_per_tok, dim=0
+    #         )
+    #         y = torch.empty_like(hidden_states)
+    #         for i, expert in enumerate(self.experts):
+    #             y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i])
+    #         y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
+    #         y = y.view(*orig_shape)
+    #         y = AddAuxiliaryLoss.apply(y, aux_loss)
+    #     else:
+    #         y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
+    #     if self.config.n_shared_experts is not None:
+    #         y = y + self.shared_experts(identity)
+    #     dist.all_reduce(y, group=self.tp_group)
+    #     return y
+
+    # @torch.no_grad()
+    # def moe_infer(self, x, expert_indices, expert_weights):
+    #     expert_cache = torch.zeros_like(x)
+    #     for i, expert in enumerate(self.experts):
+    #         token_idx, nth_expert = torch.where(expert_indices == i)
+    #         expert_cache[token_idx] += expert_weights[
+    #             token_idx, nth_expert, None
+    #         ] * expert(x[token_idx])
+
+    #     return expert_cache
 
     def forward(self, hidden_states):
         identity = hidden_states

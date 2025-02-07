@@ -46,6 +46,8 @@ def load_state_dict(
     n_routed_experts = getattr(config, "n_routed_experts")
     first_k_dense_replace = getattr(config, "first_k_dense_replace")
     moe_layer_freq = getattr(config, "moe_layer_freq")
+    expert_start_idx = getattr(config, "expert_start_idx", None)
+    expert_end_idx = getattr(config, "expert_end_idx", None)
 
     if checkpoint_file.endswith(".safetensors") and is_safetensors_available():
         # Check format of the archive
@@ -62,6 +64,16 @@ def load_state_dict(
                     layer_id = int(param_name.split(".")[2])
                     if layer_id < layer_start_idx or layer_id >= layer_end_idx:
                         continue
+                    if (
+                        expert_start_idx != None
+                        and param_name.split(".")[-4] == "experts"
+                    ):
+                        expert_idx = int(param_name.split(".")[-3])
+                        if (
+                            expert_idx < expert_start_idx
+                            or expert_idx >= expert_end_idx
+                        ):
+                            continue
                 else:
                     key = param_name.split(".")[-2]
                     if key == "embed_tokens" and layer_start_idx != 0:
@@ -70,7 +82,10 @@ def load_state_dict(
                         key == "norm" or key == "lm_head"
                     ) and layer_end_idx != num_hidden_layers:
                         continue
-
+                # print(
+                #     dist.get_rank(),
+                #     param_name,
+                # )
                 param = f.get_tensor(param_name)
                 key = param_name.split(".")[-2]
                 if key == "embed_tokens" and vocab_start_idx != None:
@@ -102,7 +117,6 @@ def load_state_dict(
                             param = param[moe_dim_start_idx:moe_dim_end_idx]
                     else:
                         param = param[dim_start_idx:dim_end_idx]
-
                 elif key == "down_proj" and dim_start_idx != None:
                     layer_idx = int(param_name.split(".")[2])
                     if (
@@ -118,14 +132,12 @@ def load_state_dict(
                             param = param[:, moe_dim_start_idx:moe_dim_end_idx]
                     else:
                         param = param[:, dim_start_idx:dim_end_idx]
-
                 elif key == "lm_head" and vocab_start_idx != None:
                     param = param[vocab_start_idx:vocab_end_idx]
 
                 state_dict[param_name] = param
 
         return state_dict
-        # return safe_load_file(checkpoint_file)
 
     try:
         if map_location is None:
@@ -258,6 +270,28 @@ def getModelandTokenizeer(
             torch_dtype=dtype,
             device_map=device,
         )
+    elif model_version == "PP+EP":
+        assert nnodes > 1
+        model = Transformer.from_pretrained(
+            model_path,
+            pipeline_rank=node_rank,
+            num_pipeline_ranks=nnodes,
+            tp_rank=local_rank,
+            num_tp_ranks=local_world_size,
+            tp_group=dist.new_group(
+                ranks=list(
+                    range(
+                        world_rank - local_rank,
+                        world_rank - local_rank + local_world_size,
+                    )
+                ),
+                backend="nccl",
+            ),
+            ep_rank=local_rank,
+            num_ep_ranks=local_world_size,
+            torch_dtype=dtype,
+            device_map=device,
+        )
     elif model_version == "TP+EP":
         assert nnodes > 1
         model = Transformer.from_pretrained(
@@ -270,137 +304,34 @@ def getModelandTokenizeer(
             torch_dtype=dtype,
             device_map=device,
         )
+    elif model_version == "TP+EP-1-1-2":
+        assert nnodes == 1 and world_size == 3
+        model = Transformer.from_pretrained(
+            model_path,
+            tp_rank=world_rank,
+            num_tp_ranks=world_size,
+            tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
+            ep_rank=0 if world_rank == 0 else 1,
+            num_ep_ranks=2,
+            torch_dtype=dtype,
+            device_map=device,
+        )
+    elif model_version == "TP+EP-1-2-2":
+        assert nnodes == 1 and world_size == 4
+        model = Transformer.from_pretrained(
+            model_path,
+            tp_rank=world_rank,
+            num_tp_ranks=world_size,
+            tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
+            ep_rank=world_rank // 2,
+            num_ep_ranks=world_size // 2,
+            torch_dtype=dtype,
+            device_map=device,
+        )
 
     if model_name == "deepseek-moe-16b-chat":
         model.generation_config = GenerationConfig.from_pretrained(model_path)
         model.generation_config.pad_token_id = model.generation_config.eos_token_id
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-
-    # if model_version == "PP":
-    #     model = Transformer.from_folder(
-    #         folder_path=model_path,
-    #         args=args,
-    #         pipeline_rank=world_rank,
-    #         num_pipeline_ranks=world_size,
-    #         num_tp_ranks=1,
-    #         device=device,
-    #         dtype=dtype,
-    #     )
-    # elif model_version == "TP":
-    #     model = Transformer.from_folder(
-    #         folder_path=model_path,
-    #         args=args,
-    #         pipeline_rank=0,
-    #         num_pipeline_ranks=1,
-    #         tp_rank=world_rank,
-    #         num_tp_ranks=world_size,
-    #         tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
-    #         device=device,
-    #         dtype=dtype,
-    #     )
-    # elif model_version == "PP+TP":
-    #     assert nnodes > 1
-    #     model = Transformer.from_folder(
-    #         folder_path=model_path,
-    #         args=args,
-    #         pipeline_rank=node_rank,
-    #         num_pipeline_ranks=nnodes,
-    #         tp_rank=local_rank,
-    #         num_tp_ranks=local_world_size,
-    #         tp_group=dist.new_group(
-    #             ranks=list(
-    #                 range(
-    #                     world_rank - local_rank,
-    #                     world_rank - local_rank + local_world_size,
-    #                 )
-    #             ),
-    #             backend="nccl",
-    #         ),
-    #         device=device,
-    #         dtype=dtype,
-    #     )
-    # elif model_version == "TP+EP":
-    #     assert nnodes > 1
-    #     model = Transformer.from_folder(
-    #         folder_path=model_path,
-    #         args=args,
-    #         pipeline_rank=0,
-    #         num_pipeline_ranks=1,
-    #         tp_rank=world_rank,
-    #         num_tp_ranks=world_size,
-    #         tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
-    #         ep_rank=node_rank,
-    #         num_ep_ranks=nnodes,
-    #         device=device,
-    #         dtype=dtype,
-    #     )
-    # elif model_version == "EP":
-    #     model = Transformer.from_folder(
-    #         folder_path=model_path,
-    #         args=args,
-    #         pipeline_rank=0,
-    #         num_pipeline_ranks=1,
-    #         tp_rank=world_rank,
-    #         num_tp_ranks=world_size,
-    #         tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
-    #         ep_rank=world_rank,
-    #         num_ep_ranks=world_size,
-    #         device=device,
-    #         dtype=dtype,
-    #     )
-    # elif model_version == "PP+EP":
-    #     assert nnodes > 1
-    #     model = Transformer.from_folder(
-    #         folder_path=model_path,
-    #         args=args,
-    #         pipeline_rank=node_rank,
-    #         num_pipeline_ranks=nnodes,
-    #         tp_rank=local_rank,
-    #         num_tp_ranks=local_world_size,
-    #         tp_group=dist.new_group(
-    #             ranks=list(
-    #                 range(
-    #                     world_rank - local_rank,
-    #                     world_rank - local_rank + local_world_size,
-    #                 )
-    #             ),
-    #             backend="nccl",
-    #         ),
-    #         ep_rank=local_rank,
-    #         num_ep_ranks=local_world_size,
-    #         device=device,
-    #         dtype=dtype,
-    #     )
-    # elif model_version == "TP+EP-1-1-2":
-    #     assert nnodes == 1 and world_size == 3
-    #     model = Transformer.from_folder(
-    #         folder_path=model_path,
-    #         args=args,
-    #         pipeline_rank=0,
-    #         num_pipeline_ranks=1,
-    #         tp_rank=world_rank,
-    #         num_tp_ranks=world_size,
-    #         tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
-    #         ep_rank=0 if world_rank == 0 else 1,
-    #         num_ep_ranks=2,
-    #         device=device,
-    #         dtype=dtype,
-    #     )
-    # elif model_version == "TP+EP-1-2-2":
-    #     assert nnodes == 1 and world_size == 4
-    #     model = Transformer.from_folder(
-    #         folder_path=model_path,
-    #         args=args,
-    #         pipeline_rank=0,
-    #         num_pipeline_ranks=1,
-    #         tp_rank=world_rank,
-    #         num_tp_ranks=world_size,
-    #         tp_group=dist.new_group(ranks=list(range(world_size)), backend="nccl"),
-    #         ep_rank=world_rank // 2,
-    #         num_ep_ranks=world_size // 2,
-    #         device=device,
-    #         dtype=dtype,
-    #     )
-
     return model, tokenizer
