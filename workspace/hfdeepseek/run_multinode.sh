@@ -23,7 +23,7 @@ if [ ! -z "$SLURM_NODEID" ]; then
   output_folder="result/job${SLURM_JOB_ID}"
   output_file="${mode}_${model}_${model_version}_node${SLURM_NODEID}_multinode.txt"
 else
-  output_folder="result"
+  output_folder="result/${mode}_${model}_multinode"
   output_file="${mode}_${model}_${model_version}_multinode.txt"
 fi
 mkdir -p $output_folder

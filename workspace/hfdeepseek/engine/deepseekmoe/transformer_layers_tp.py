@@ -72,8 +72,6 @@ class ParallelEmbedding(nn.Embedding):
         self.tp_group = tp_group
         self.vocab_start_idx = vocab_start_idx
         self.vocab_end_idx = vocab_end_idx
-        # self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
-        # self.weight = nn.Embedding(vocab_size, dim, padding_idx)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -93,8 +91,6 @@ class ParallelEmbedding(nn.Embedding):
         x = x - self.vocab_start_idx
         x[mask] = 0
         y = super().forward(x)
-        # y = self.weight(x)
-        # y = F.embedding(x, self.weight)
         y[mask] = 0
         dist.all_reduce(y, group=self.tp_group)
         return y
@@ -130,17 +126,6 @@ class DeepseekAttentionTP(nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
         self.is_causal = True
-
-        # if dist.get_rank() == 0:
-        #     print(
-        #         self.num_heads,
-        #         self.num_key_value_heads,
-        #         self.num_key_value_groups,
-        #         self.hidden_size,
-        #         self.head_dim,
-        #     )
-        # dist.destroy_process_group()
-        # exit()
 
         self.q_proj = nn.Linear(
             self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias
@@ -293,7 +278,6 @@ class DeepseekAttentionTP(nn.Module):
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                 )
             attn_weights = attn_weights + attention_mask
-
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(
             attn_weights, dim=-1, dtype=torch.float32
@@ -515,40 +499,6 @@ class MoETP(nn.Module):
             self.shared_experts = DeepseekMLP(
                 config=config, intermediate_size=config.shared_moe_intermediate_size
             )
-
-    # def forward(self, hidden_states):
-    #     identity = hidden_states
-    #     orig_shape = hidden_states.shape
-    #     topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
-    #     hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-    #     if self.training:
-    #         flat_topk_idx = topk_idx.view(-1)
-    #         hidden_states = hidden_states.repeat_interleave(
-    #             self.num_experts_per_tok, dim=0
-    #         )
-    #         y = torch.empty_like(hidden_states)
-    #         for i, expert in enumerate(self.experts):
-    #             y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i])
-    #         y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
-    #         y = y.view(*orig_shape)
-    #         y = AddAuxiliaryLoss.apply(y, aux_loss)
-    #     else:
-    #         y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
-    #     if self.config.n_shared_experts is not None:
-    #         y = y + self.shared_experts(identity)
-    #     dist.all_reduce(y, group=self.tp_group)
-    #     return y
-
-    # @torch.no_grad()
-    # def moe_infer(self, x, expert_indices, expert_weights):
-    #     expert_cache = torch.zeros_like(x)
-    #     for i, expert in enumerate(self.experts):
-    #         token_idx, nth_expert = torch.where(expert_indices == i)
-    #         expert_cache[token_idx] += expert_weights[
-    #             token_idx, nth_expert, None
-    #         ] * expert(x[token_idx])
-
-    #     return expert_cache
 
     def forward(self, hidden_states):
         identity = hidden_states

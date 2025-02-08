@@ -20,23 +20,20 @@ def generate(
 
     B = len(prompts)
     inputs = tokenizer(prompts, padding=True, return_tensors="pt").to(model.device)
-    past_key_values = DynamicCache()
     generated_tokens = []
     is_finished = torch.tensor([False for _ in range(B)])
+
+    past_key_values = DynamicCache()
     for _ in range(max_new_tokens):
         outputs = model(**inputs, past_key_values=past_key_values, use_cache=True)
-
         # next_token_ids = outputs.logits[:, -1:].argmax(-1)
         next_token_ids = sample(
             outputs.logits[:, -1:], temperature=temperature, top_p=top_p
         )
-
         if eos_id is not None:
             is_finished = is_finished | (next_token_ids == eos_id).cpu()
-
         if is_finished.all():
             break
-
         next_token_ids = next_token_ids[:, None]
         generated_tokens.append(next_token_ids.cpu())
         attention_mask = inputs["attention_mask"]
@@ -58,8 +55,10 @@ def measure_generate(
     tokenizer: AutoTokenizer,
     model,
     max_new_tokens: int,
+    max_batch_size: int,
     temperature: float,
     top_p: float,
+    use_cache: bool,
     eos_id: Optional[int] = None,
 ):
 
@@ -67,33 +66,47 @@ def measure_generate(
     B = len(prompts)
     inputs = tokenizer(prompts, padding=True, return_tensors="pt").to(model.device)
     n_prefill_tokens = inputs.input_ids.numel()
-    past_key_values = DynamicCache()
     generated_tokens = []
     is_finished = torch.tensor([False for _ in range(B)])
-    for _ in range(max_new_tokens):
-        outputs = model(**inputs, past_key_values=past_key_values, use_cache=True)
-        if _ == 0:
-            dist.barrier()
-            t1 = time.time()
-        # next_token_ids = outputs.logits[:, -1:].argmax(-1)
-        next_token_ids = sample(
-            outputs.logits[:, -1:], temperature=temperature, top_p=top_p
-        )
-
-        if eos_id is not None:
-            is_finished = is_finished | (next_token_ids == eos_id).cpu()
-
-        if is_finished.all():
-            break
-
-        next_token_ids = next_token_ids[:, None]
-        generated_tokens.append(next_token_ids.cpu())
-        attention_mask = inputs["attention_mask"]
-        attention_mask = torch.cat(
-            [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
-            dim=-1,
-        )
-        inputs = {"input_ids": next_token_ids, "attention_mask": attention_mask}
+    if use_cache:
+        past_key_values = DynamicCache()
+        for _ in range(max_new_tokens):
+            outputs = model(**inputs, past_key_values=past_key_values, use_cache=True)
+            if _ == 0:
+                dist.barrier()
+                t1 = time.time()
+            next_token_ids = sample(
+                outputs.logits[:, -1:], temperature=temperature, top_p=top_p
+            )
+            if eos_id is not None:
+                is_finished = is_finished | (next_token_ids == eos_id).cpu()
+            if is_finished.all():
+                break
+            next_token_ids = next_token_ids[:, None]
+            generated_tokens.append(next_token_ids.cpu())
+            attention_mask = inputs["attention_mask"]
+            attention_mask = torch.cat(
+                [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
+                dim=-1,
+            )
+            inputs = {"input_ids": next_token_ids, "attention_mask": attention_mask}
+    else:
+        generated_ids = inputs.input_ids
+        for _ in range(max_new_tokens):
+            outputs = model(generated_ids)
+            if _ == 0:
+                dist.barrier()
+                t1 = time.time()
+            next_token_ids = sample(
+                outputs.logits[:, -1:], temperature=temperature, top_p=top_p
+            )
+            if eos_id is not None:
+                is_finished = is_finished | (next_token_ids == eos_id).cpu()
+            if is_finished.all():
+                break
+            next_token_ids = next_token_ids[:, None]
+            generated_tokens.append(next_token_ids.cpu())
+            generated_ids = torch.cat([generated_ids, next_token_ids], dim=-1)
 
     dist.barrier()
     t2 = time.time()

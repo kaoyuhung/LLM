@@ -29,6 +29,8 @@ def run(
     device: torch.device,
     dtype: torch.dtype,
     model_version: Optional[str],
+    use_cache: bool,
+    prompt: str,
 ):
     model, tokenizer = getModelandTokenizeer(
         WORLD_RANK,
@@ -59,6 +61,21 @@ def run(
                     depth=6,
                 )
             dist.barrier()
+
+    elif mode == "interative":
+        responses = generate(
+            [prompt],
+            tokenizer,
+            model,
+            max_new_tokens=max_tokens,
+            temperature=T,
+            top_p=P,
+            eos_id=model.generation_config.eos_token_id,
+        )
+        if LOCAL_RANK == 0:
+            print(f"[INST]{prompt}[/INST]\n\nASSISTANT:{responses[0]}")
+
+        dist.barrier()
 
     elif mode == "genText":
         for i in range(eval_nItrs):
@@ -118,8 +135,10 @@ def run(
                     tokenizer,
                     model,
                     max_new_tokens=max_tokens,
+                    max_batch_size=batch_size,
                     temperature=T,
                     top_p=P,
+                    use_cache=use_cache,
                     eos_id=model.generation_config.eos_token_id,
                 )
             )
@@ -239,7 +258,7 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="deepseek-moe-16b-chat",
-        choices=["deepseek-moe-16b-chat", "DeepSeek-V3"],
+        choices=["deepseek-moe-16b-chat", "DeepSeek-V2-Lite"],
     )
     parser.add_argument("--max_tokens", type=int, default=128)
     parser.add_argument("--T", type=float, default=0, help="temperature")
@@ -248,8 +267,17 @@ if __name__ == "__main__":
         "--mode",
         type=str,
         default="measure",
-        choices=["genText", "printModel", "measure", "nsys_profile", "profile", "eval"],
+        choices=[
+            "genText",
+            "printModel",
+            "measure",
+            "nsys_profile",
+            "profile",
+            "eval",
+            "interative",
+        ],
     )
+    parser.add_argument("--prompt", type=str, default="What is DeepSeek?")
     parser.add_argument(
         "--prompt_path",
         type=str,
@@ -287,6 +315,7 @@ if __name__ == "__main__":
             "TP+EP-1-2-2",
         ],
     )
+    parser.add_argument("--use_cache", type=eval, default=True)
     args = parser.parse_args()
 
     setup_seed(args.seed)
@@ -319,5 +348,7 @@ if __name__ == "__main__":
         device,
         getattr(torch, args.dtype),
         args.model_version,
+        args.use_cache,
+        args.prompt,
     )
     dist.destroy_process_group()

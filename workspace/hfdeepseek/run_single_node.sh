@@ -14,7 +14,7 @@ model_version=${5}
 if [ ! -z "$SLURM_NODEID" ]; then
   output_folder="result/job${SLURM_JOB_ID}"
 else
-  output_folder="result"
+  output_folder="result/${mode}_${model}_single_node"
 fi
 output_file="${mode}_${model}_${model_version}_single_node.txt"
 

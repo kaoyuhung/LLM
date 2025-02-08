@@ -29,13 +29,16 @@ class MoEEP(nn.Module):
         self.num_experts_per_tok = config.num_experts_per_tok
         self.expert_start_idx = config.expert_start_idx
         self.expert_end_idx = config.expert_end_idx
-        self.experts = nn.ModuleDict(
-            {
-                str(i): DeepseekMLP(
-                    config, intermediate_size=config.moe_intermediate_size
+
+        self.experts = nn.ModuleList(
+            [
+                (
+                    DeepseekMLP(config, intermediate_size=config.moe_intermediate_size)
+                    if i >= self.expert_start_idx and i < self.expert_end_idx
+                    else None
                 )
-                for i in range(self.expert_start_idx, self.expert_end_idx)
-            }
+                for i in range(config.n_routed_experts)
+            ]
         )
         self.gate = MoEGate(config)
         if config.n_shared_experts is not None:
@@ -83,7 +86,7 @@ class MoEEP(nn.Module):
             end_idx = tokens_per_expert[i]
             if start_idx == end_idx:
                 continue
-            expert = self.experts[str(i)]
+            expert = self.experts[i]
             exp_token_idx = token_idxs[start_idx:end_idx]
             expert_tokens = x[exp_token_idx]
             expert_out = expert(expert_tokens)
