@@ -4,18 +4,16 @@ import math
 
 sys.path.append("..")
 import argparse
-import torch
-import torch.distributed as dist
 from typing import Optional
-
-from engine.generate import (
-    generate,
-)
-from engine.deepseekutil import getModelandTokenizeer
-from util import setup_seed, load_data, get_nnodes
-from torchinfo import summary
 from tqdm import tqdm
 from datetime import timedelta
+
+import torch
+import torch.distributed as dist
+from torchinfo import summary
+from util import setup_seed, load_data, get_nnodes
+from engine.utils import getModelandTokenizeer
+from engine.generate import generate, measure_generate
 
 
 def run(
@@ -31,6 +29,8 @@ def run(
     device: torch.device,
     dtype: torch.dtype,
     model_version: Optional[str],
+    use_cache: bool,
+    prompt: str,
 ):
     model, tokenizer = getModelandTokenizeer(
         WORLD_RANK,
@@ -62,27 +62,39 @@ def run(
                 )
             dist.barrier()
 
+    elif mode == "interative":
+        responses = generate(
+            [prompt],
+            tokenizer,
+            model,
+            max_new_tokens=max_tokens,
+            temperature=T,
+            top_p=P,
+            eos_id=model.generation_config.eos_token_id,
+        )
+        if LOCAL_RANK == 0:
+            print(f"[INST]{prompt}[/INST]\n\nASSISTANT:{responses[0]}")
+
+        dist.barrier()
+
     elif mode == "genText":
         for i in range(eval_nItrs):
-            out_tokens, _ = generate(
+            responses = generate(
                 prompts[
                     i * batch_size : i * batch_size
                     + min(batch_size, len(prompts) - i * batch_size)
                 ],
                 tokenizer,
                 model,
-                max_tokens=max_tokens,
+                max_new_tokens=max_tokens,
                 temperature=T,
                 top_p=P,
-                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                eos_id=model.generation_config.eos_token_id,
             )
             if LOCAL_RANK == 0:
-                for id in range(len(out_tokens)):
+                for id, resonse in enumerate(responses):
                     prompt_id = i * batch_size + id
-                    result = tokenizer.instruct_tokenizer.tokenizer.decode(
-                        out_tokens[id]
-                    )
-                    print(f"[INST]{prompts[prompt_id]}[/INST]\n\nASSISTANT:{result}")
+                    print(f"[INST]{prompts[prompt_id]}[/INST]\n\nASSISTANT:{resonse}")
                     print("-" * 100)
 
         dist.barrier()
@@ -94,10 +106,10 @@ def run(
                     [prompts[0]],
                     tokenizer,
                     model,
-                    max_tokens=max_tokens,
+                    max_new_tokens=max_tokens,
                     temperature=T,
                     top_p=P,
-                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                    eos_id=model.generation_config.eos_token_id,
                 )
         else:
             for _ in range(warmup_iters):
@@ -105,10 +117,10 @@ def run(
                     [prompts[0]],
                     tokenizer,
                     model,
-                    max_tokens=max_tokens,
+                    max_new_tokens=max_tokens,
                     temperature=T,
                     top_p=P,
-                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                    eos_id=model.generation_config.eos_token_id,
                 )
         dist.barrier()
 
@@ -117,21 +129,23 @@ def run(
                 i * batch_size : i * batch_size
                 + min(batch_size, len(prompts) - i * batch_size)
             ]
-            n_prefill_token, prefill_time, out_tokens, decode_time = measure_generate(
-                inputs,
-                tokenizer,
-                model,
-                max_tokens=max_tokens,
-                temperature=T,
-                top_p=P,
-                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+            prefill_time, decode_time, n_prefill_tokens, n_decode_tokens = (
+                measure_generate(
+                    inputs,
+                    tokenizer,
+                    model,
+                    max_new_tokens=max_tokens,
+                    max_batch_size=batch_size,
+                    temperature=T,
+                    top_p=P,
+                    use_cache=use_cache,
+                    eos_id=model.generation_config.eos_token_id,
+                )
             )
-            n_decode_token = len(sum(out_tokens, [])) - batch_size
-
             if LOCAL_RANK == 0:
                 print(f"evalItr{i} (batch_size={batch_size})")
                 print(
-                    f"Prefill time: {prefill_time:.2f} s, Decode time: {(decode_time):.2f} s, Prefill throughput: {n_prefill_token/prefill_time:.2f} tokens/s, Decode throughtput: {(n_decode_token/decode_time):.2f} tokens/s"
+                    f"Prefill time: {prefill_time:.2f} s, Decode time: {(decode_time):.2f} s, Prefill throughput: {n_prefill_tokens / prefill_time:.2f} tokens/s, Decode throughtput: {(n_decode_tokens / decode_time):.2f} tokens/s"
                 )
                 print("-" * 100)
 
@@ -244,12 +258,7 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="deepseek-moe-16b-chat",
-        choices=["deepseek-moe-16b-chat", "DeepSeek-V3"],
-    )
-    parser.add_argument(
-        "--config_path",
-        type=str,
-        default="configs/config_671B",
+        choices=["deepseek-moe-16b-chat", "DeepSeek-V2-Lite"],
     )
     parser.add_argument("--max_tokens", type=int, default=128)
     parser.add_argument("--T", type=float, default=0, help="temperature")
@@ -258,8 +267,17 @@ if __name__ == "__main__":
         "--mode",
         type=str,
         default="measure",
-        choices=["genText", "printModel", "measure", "nsys_profile", "profile", "eval"],
+        choices=[
+            "genText",
+            "printModel",
+            "measure",
+            "nsys_profile",
+            "profile",
+            "eval",
+            "interative",
+        ],
     )
+    parser.add_argument("--prompt", type=str, default="What is DeepSeek?")
     parser.add_argument(
         "--prompt_path",
         type=str,
@@ -297,6 +315,7 @@ if __name__ == "__main__":
             "TP+EP-1-2-2",
         ],
     )
+    parser.add_argument("--use_cache", type=eval, default=True)
     args = parser.parse_args()
 
     setup_seed(args.seed)
@@ -329,5 +348,7 @@ if __name__ == "__main__":
         device,
         getattr(torch, args.dtype),
         args.model_version,
+        args.use_cache,
+        args.prompt,
     )
     dist.destroy_process_group()

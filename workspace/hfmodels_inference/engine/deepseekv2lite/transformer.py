@@ -29,24 +29,17 @@ import gc
 import json
 import inspect
 import copy
+from packaging import version
 from typing import List, Optional, Tuple, Union, Type
 from multiprocessing import Process
-from packaging import version
 from zipfile import is_zipfile
-from safetensors import safe_open
-
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import CrossEntropyLoss
-
 from transformers.cache_utils import Cache, DynamicCache
-from transformers.modeling_attn_mask_utils import (
-    _prepare_4d_causal_attention_mask,
-    _prepare_4d_causal_attention_mask_for_sdpa,
-)
+from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
@@ -55,8 +48,8 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
-    logging,
     replace_return_docstrings,
+    logging,
     is_safetensors_available,
     is_accelerate_available,
     cached_file,
@@ -120,25 +113,25 @@ from accelerate.utils import (
     get_max_memory,
     check_tied_parameters_on_same_device,
 )
-from ..configuration_deepseek import DeepseekConfig
-from util import get_nproc_per_rank
-from engine.deepseekmoe.transformer_layers import (
-    DeepseekDecoderLayer,
-    DeepseekRMSNorm,
+from engine.deepseekv2lite.transformer_layers import (
+    DeepseekV2DecoderLayer,
+    DeepseekV2RMSNorm,
     logger,
     _CONFIG_FOR_DOC,
 )
-from engine.deepseekmoe.transformer_layers_tp import (
+from engine.deepseekv2lite.transformer_layers_tp import (
     ParallelEmbedding,
-    DeepseekDecoderLayerTP,
     ColumnParallelLinear,
+    DeepseekV2DecoderLayerTP,
 )
-from engine.deepseekmoe.transformer_layers_ep import DeepseekDecoderLayerEP
+from engine.deepseekv2lite.transformer_layers_ep import DeepseekV2DecoderLayerEP
+from util import get_nproc_per_rank
+from .configuration_deepseek import DeepseekV2Config
 
 
 def load_state_dict(
     checkpoint_file: Union[str, os.PathLike],
-    config: DeepseekConfig,
+    config: DeepseekV2Config,
     is_quantized: bool = False,
     map_location: Optional[Union[str, torch.device]] = None,
     weights_only: bool = True,
@@ -149,7 +142,9 @@ def load_state_dict(
     layer_start_idx = config.layer_start_idx
     layer_end_idx = config.layer_end_idx
     num_hidden_layers = config.num_hidden_layers
-
+    q_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
+    v_head_dim = config.v_head_dim
+    qk_rope_head_dim = config.qk_rope_head_dim
     vocab_start_idx = getattr(config, "vocab_start_idx", None)
     vocab_end_idx = getattr(config, "vocab_end_idx", None)
     dim_start_idx = getattr(config, "dim_start_idx", None)
@@ -158,11 +153,8 @@ def load_state_dict(
     shared_moe_dim_end_idx = getattr(config, "shared_moe_dim_end_idx", None)
     moe_dim_start_idx = getattr(config, "moe_dim_start_idx", None)
     moe_dim_end_idx = getattr(config, "moe_dim_end_idx", None)
-    kv_heads_start_idx = getattr(config, "kv_heads_start_idx", None)
-    kv_heads_end_idx = getattr(config, "kv_heads_end_idx", None)
     heads_start_idx = getattr(config, "heads_start_idx", None)
     heads_end_idx = getattr(config, "heads_end_idx", None)
-    head_dim = getattr(config, "head_dim", None)
     n_routed_experts = getattr(config, "n_routed_experts")
     first_k_dense_replace = getattr(config, "first_k_dense_replace")
     moe_layer_freq = getattr(config, "moe_layer_freq")
@@ -208,16 +200,18 @@ def load_state_dict(
                 if key == "embed_tokens" and vocab_start_idx != None:
                     param = param[vocab_start_idx:vocab_end_idx]
                 elif key == "q_proj" and heads_start_idx != None:
-                    param = param[head_dim * heads_start_idx : head_dim * heads_end_idx]
-                elif (
-                    key == "k_proj" or key == "v_proj"
-                ) and kv_heads_start_idx != None:
                     param = param[
-                        head_dim * kv_heads_start_idx : head_dim * kv_heads_end_idx
+                        q_head_dim * heads_start_idx : q_head_dim * heads_end_idx
+                    ]
+                elif key == "kv_b_proj" and heads_start_idx != None:
+                    param = param[
+                        (q_head_dim - qk_rope_head_dim + v_head_dim)
+                        * heads_start_idx : (q_head_dim - qk_rope_head_dim + v_head_dim)
+                        * heads_end_idx
                     ]
                 elif key == "o_proj" and heads_start_idx != None:
                     param = param[
-                        :, head_dim * heads_start_idx : head_dim * heads_end_idx
+                        :, v_head_dim * heads_start_idx : v_head_dim * heads_end_idx
                     ]
                 elif (key == "gate_proj" or key == "up_proj") and dim_start_idx != None:
                     layer_idx = int(param_name.split(".")[2])
@@ -253,7 +247,6 @@ def load_state_dict(
                     param = param[vocab_start_idx:vocab_end_idx]
 
                 state_dict[param_name] = param
-
         return state_dict
 
     try:
@@ -311,7 +304,7 @@ def load_state_dict(
             )
 
 
-Deepseek_START_DOCSTRING = r"""
+DeepseekV2_START_DOCSTRING = r"""
     This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
     library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
     etc.)
@@ -321,7 +314,7 @@ Deepseek_START_DOCSTRING = r"""
     and behavior.
 
     Parameters:
-        config ([`DeepseekConfig`]):
+        config ([`DeepseekV2Config`]):
             Model configuration class with all the parameters of the model. Initializing with a config file does not
             load the weights associated with the model, only the configuration. Check out the
             [`~PreTrainedModel.from_pretrained`] method to load the model weights.
@@ -329,17 +322,16 @@ Deepseek_START_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare Deepseek Model outputting raw hidden-states without any specific head on top.",
-    Deepseek_START_DOCSTRING,
+    "The bare DeepseekV2 Model outputting raw hidden-states without any specific head on top.",
+    DeepseekV2_START_DOCSTRING,
 )
-class DeepseekPreTrainedModel(PreTrainedModel):
-    config_class = DeepseekConfig
+class DeepseekV2PreTrainedModel(PreTrainedModel):
+    config_class = DeepseekV2Config
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["DeepseekDecoderLayer"]
+    _no_split_modules = ["DeepseekV2DecoderLayer"]
     _skip_keys_device_placement = "past_key_values"
     _supports_flash_attn_2 = True
-    _supports_sdpa = True
     _supports_cache_class = True
 
     def _init_weights(self, module):
@@ -354,7 +346,7 @@ class DeepseekPreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
-Deepseek_INPUTS_DOCSTRING = r"""
+DeepseekV2_INPUTS_DOCSTRING = r"""
     Args:
         input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
             Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
@@ -425,20 +417,20 @@ Deepseek_INPUTS_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare Deepseek Model outputting raw hidden-states without any specific head on top.",
-    Deepseek_START_DOCSTRING,
+    "The bare DeepseekV2 Model outputting raw hidden-states without any specific head on top.",
+    DeepseekV2_START_DOCSTRING,
 )
-class DeepseekModel(DeepseekPreTrainedModel):
+class DeepseekV2Model(DeepseekV2PreTrainedModel):
     """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`DeepseekDecoderLayer`]
+    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`DeepseekV2DecoderLayer`]
 
     Args:
-        config: DeepseekConfig
+        config: DeepseekV2Config
     """
 
     def __init__(
         self,
-        config: DeepseekConfig,
+        config: DeepseekV2Config,
         pipeline_rank: int = 0,
         num_pipeline_ranks: int = 1,
         tp_rank: int = 0,
@@ -446,6 +438,7 @@ class DeepseekModel(DeepseekPreTrainedModel):
         tp_group: Optional[dist.distributed_c10d.ProcessGroup] = None,
         num_ep_ranks: Optional[int] = None,
     ):
+
         super().__init__(config)
         self.hidden_size = config.hidden_size
         self.padding_idx = config.pad_token_id
@@ -475,18 +468,20 @@ class DeepseekModel(DeepseekPreTrainedModel):
 
         if self.num_tp_ranks == 1:
             layers = [
-                DeepseekDecoderLayer(config, layer_idx)
+                DeepseekV2DecoderLayer(config, layer_idx)
                 for layer_idx in range(config.num_hidden_layers)
             ]
         else:
             if num_ep_ranks != None:
                 layers = [
-                    DeepseekDecoderLayerEP(config, layer_idx, self.tp_group)
+                    DeepseekV2DecoderLayerEP(
+                        config, layer_idx, self.tp_group, num_ep_ranks
+                    )
                     for layer_idx in range(config.num_hidden_layers)
                 ]
             else:
                 layers = [
-                    DeepseekDecoderLayerTP(config, layer_idx, self.tp_group)
+                    DeepseekV2DecoderLayerTP(config, layer_idx, self.tp_group)
                     for layer_idx in range(config.num_hidden_layers)
                 ]
 
@@ -496,19 +491,12 @@ class DeepseekModel(DeepseekPreTrainedModel):
                 for i in range(config.layer_start_idx, config.layer_end_idx)
             }
         )
-        # self.layers = nn.ModuleList(
-        #     [
-        #         DeepseekDecoderLayer(config, layer_idx)
-        #         for layer_idx in range(config.num_hidden_layers)
-        #     ]
-        # )
-        self._use_sdpa = config._attn_implementation == "sdpa"
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
 
         if pipeline_rank == self.num_pipeline_ranks - 1:
-            self.norm = DeepseekRMSNorm(self.hidden_size, eps=config.rms_norm_eps)
+            self.norm = DeepseekV2RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
         else:
-            self.norm: Optional[DeepseekRMSNorm] = None
+            self.norm: Optional[DeepseekV2RMSNorm] = None
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -520,7 +508,7 @@ class DeepseekModel(DeepseekPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    @add_start_docstrings_to_model_forward(Deepseek_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(DeepseekV2_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -544,9 +532,11 @@ class DeepseekModel(DeepseekPreTrainedModel):
             else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
+
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
+
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError(
@@ -610,15 +600,6 @@ class DeepseekModel(DeepseekPreTrainedModel):
                 attention_mask
                 if (attention_mask is not None and 0 in attention_mask)
                 else None
-            )
-        elif self._use_sdpa and not output_attentions:
-            # output_attentions=True can not be supported when using SDPA, and we fall back on
-            # the manual implementation that requires a 4D causal mask in all cases.
-            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-                attention_mask,
-                (batch_size, seq_length),
-                inputs_embeds,
-                past_key_values_length,
             )
         else:
             # 4d mask is passed through the layers
@@ -702,16 +683,8 @@ class DeepseekModel(DeepseekPreTrainedModel):
             attentions=all_self_attns,
         )
 
-    @property
-    def dtype(self) -> torch.dtype:
-        return next(self.parameters()).dtype
 
-    @property
-    def device(self) -> torch.device:
-        return next(self.parameters()).device
-
-
-class Transformer(DeepseekPreTrainedModel):
+class Transformer(DeepseekV2PreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(
@@ -728,6 +701,7 @@ class Transformer(DeepseekPreTrainedModel):
     ):
         super().__init__(config)
         self.vocab_size = config.vocab_size
+
         self.pipeline_rank = pipeline_rank
         self.num_pipeline_ranks = num_pipeline_ranks
         assert self.pipeline_rank < self.num_pipeline_ranks
@@ -787,7 +761,6 @@ class Transformer(DeepseekPreTrainedModel):
         # exit()
 
         if self.num_tp_ranks > 1:
-
             # Split Vocabulary Size
             remainder = config.vocab_size % self.num_tp_ranks
             tp_vocab_size = config.vocab_size // self.num_tp_ranks
@@ -910,26 +883,15 @@ class Transformer(DeepseekPreTrainedModel):
                 config.moe_dim_end_idx = moe_dim_end_idx
 
             # For Attn Layer
-            config.head_dim = config.hidden_size // config.num_attention_heads
-            n_heads_per_group = config.num_attention_heads // config.num_key_value_heads
-            remainder = config.num_key_value_heads % self.num_tp_ranks
-            n_kv_heads = config.num_key_value_heads // self.num_tp_ranks
-            kv_heads_start_idx = self.tp_rank * n_kv_heads
-            n_heads = n_kv_heads * n_heads_per_group
+            remainder = config.num_attention_heads % self.num_tp_ranks
+            n_heads = config.num_attention_heads // self.num_tp_ranks
             heads_start_idx = self.tp_rank * n_heads
             if self.num_tp_ranks - self.tp_rank <= remainder:
-                n_kv_heads += 1
-                kv_heads_start_idx += remainder - (self.num_tp_ranks - self.tp_rank)
-                n_heads += n_heads_per_group
-                heads_start_idx += (
-                    remainder - (self.num_tp_ranks - self.tp_rank)
-                ) * n_heads_per_group
-            kv_heads_end_idx = kv_heads_start_idx + n_kv_heads
+                n_heads += 1
+                heads_start_idx += remainder - (self.num_tp_ranks - self.tp_rank)
+
             heads_end_idx = heads_start_idx + n_heads
             config.num_attention_heads = n_heads
-            config.num_key_value_heads = n_kv_heads
-            config.kv_heads_start_idx = kv_heads_start_idx
-            config.kv_heads_end_idx = kv_heads_end_idx
             config.heads_start_idx = heads_start_idx
             config.heads_end_idx = heads_end_idx
 
@@ -940,12 +902,11 @@ class Transformer(DeepseekPreTrainedModel):
             #         print(i, shared_moe_dim_start_idx, shared_moe_dim_end_idx)
             #         print(i, moe_dim_start_idx, moe_dim_end_idx)
             #         print(i, heads_start_idx, heads_end_idx)
-            #         print(i, kv_heads_start_idx, kv_heads_end_idx)
             #     dist.barrier()
             # dist.destroy_process_group()
             # exit()
 
-        self.model = DeepseekModel(
+        self.model = DeepseekV2Model(
             config,
             pipeline_rank=pipeline_rank,
             num_pipeline_ranks=num_pipeline_ranks,
@@ -970,6 +931,7 @@ class Transformer(DeepseekPreTrainedModel):
                 )
         else:
             self.lm_head: Optional[nn.Linear] = None
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -991,7 +953,7 @@ class Transformer(DeepseekPreTrainedModel):
     def get_decoder(self):
         return self.model
 
-    @add_start_docstrings_to_model_forward(Deepseek_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(DeepseekV2_INPUTS_DOCSTRING)
     @replace_return_docstrings(
         output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
     )
@@ -1020,9 +982,9 @@ class Transformer(DeepseekPreTrainedModel):
         Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, DeepseekForCausalLM
+        >>> from transformers import AutoTokenizer, DeepseekV2ForCausalLM
 
-        >>> model = DeepseekForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
+        >>> model = DeepseekV2ForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
         >>> tokenizer = AutoTokenizer.from_pretrained(PATH_TO_CONVERTED_TOKENIZER)
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
@@ -1033,7 +995,6 @@ class Transformer(DeepseekPreTrainedModel):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-
         output_attentions = (
             output_attentions
             if output_attentions is not None
@@ -1062,6 +1023,7 @@ class Transformer(DeepseekPreTrainedModel):
         )
 
         hidden_states = outputs[0]
+
         if self.pipeline_rank < self.num_pipeline_ranks - 1:
             logits = torch.empty(
                 hidden_states.shape[:-1] + (self.vocab_size,),
@@ -1086,6 +1048,7 @@ class Transformer(DeepseekPreTrainedModel):
             dist.broadcast(logits, src=dist.get_world_size() - 1)
 
         logits = logits.float()
+
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
@@ -1110,14 +1073,6 @@ class Transformer(DeepseekPreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-
-    @property
-    def dtype(self) -> torch.dtype:
-        return next(self.parameters()).dtype
-
-    @property
-    def device(self) -> torch.device:
-        return next(self.parameters()).device
 
     def prepare_inputs_for_generation(
         self,

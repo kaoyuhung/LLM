@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 import torch
 import torch.distributed as dist
 from torch import nn
-from ..configuration_deepseek import DeepseekConfig
+from .configuration_deepseek import DeepseekConfig
 from engine.deepseekmoe.transformer_layers import (
     DeepseekRMSNorm,
     AddAuxiliaryLoss,

@@ -40,7 +40,7 @@ CMD="torchrun \
     --master-addr=$master_addr \
     --master-port=$master_port \
     --max-restarts=3 \
-    run_deepseek.py --mode $mode --model $model --model_version $model_version --eval_nItrs $eval_nItrs"
+    run.py --mode $mode --model $model --model_version $model_version --eval_nItrs $eval_nItrs"
 
 if [ $mode = "measure" ]; then
   for N in 1 2 4 8 16 32 64 128 256

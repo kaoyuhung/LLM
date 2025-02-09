@@ -27,7 +27,7 @@ from engine.deepseekv2lite.transformer_layers import (
     index_first_axis,
     unpad_input,
 )
-from ..configuration_deepseek import DeepseekV2Config
+from .configuration_deepseek import DeepseekV2Config
 
 
 class ColumnParallelLinear(nn.Linear):
@@ -691,40 +691,45 @@ class DeepseekV2MoETP(nn.Module):
             y = y.to(hidden_states.dtype).view(*orig_shape)
             y = AddAuxiliaryLoss.apply(y, aux_loss)
         else:
-            # y = self.moe_infer(
-            #     hidden_states, flat_topk_idx, topk_weight.view(-1, 1)
+            # y_ = self.moe_infer_default(
+            #     hidden_states, topk_idx.view(-1), topk_weight.view(-1, 1)
             # ).view(*orig_shape)
             y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
+            # if dist.get_rank() == 0:
+            #     print(torch.max(torch.abs(y_ - y)))
+            # dist.barrier()
+            # dist.destroy_process_group()
+            # exit()
         if self.config.n_shared_experts is not None:
             y = y + self.shared_experts(identity)
         dist.all_reduce(y, group=self.tp_group)
         return y
 
-    # @torch.no_grad()
-    # def moe_infer(self, x, flat_expert_indices, flat_expert_weights):
-    #     expert_cache = torch.zeros_like(x)
-    #     idxs = flat_expert_indices.argsort()
-    #     tokens_per_expert = flat_expert_indices.bincount().cpu().numpy().cumsum(0)
-    #     token_idxs = idxs // self.num_experts_per_tok
+    @torch.no_grad()
+    def moe_infer_default(self, x, flat_expert_indices, flat_expert_weights):
+        expert_cache = torch.zeros_like(x)
+        idxs = flat_expert_indices.argsort()
+        tokens_per_expert = flat_expert_indices.bincount().cpu().numpy().cumsum(0)
+        token_idxs = idxs // self.num_experts_per_tok
 
-    #     for i, num_tokens in enumerate(tokens_per_expert):
-    #         start_idx = 0 if i == 0 else tokens_per_expert[i - 1]
-    #         end_idx = num_tokens
-    #         if start_idx == end_idx:
-    #             continue
-    #         expert = self.experts[i]
-    #         exp_token_idx = token_idxs[start_idx:end_idx]
-    #         expert_tokens = x[exp_token_idx]
-    #         expert_out = expert(expert_tokens)
-    #         expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
-    #         expert_cache.scatter_reduce_(
-    #             0,
-    #             exp_token_idx.view(-1, 1).repeat(1, x.shape[-1]),
-    #             expert_out,
-    #             reduce="sum",
-    #         )
+        for i, num_tokens in enumerate(tokens_per_expert):
+            start_idx = 0 if i == 0 else tokens_per_expert[i - 1]
+            end_idx = num_tokens
+            if start_idx == end_idx:
+                continue
+            expert = self.experts[i]
+            exp_token_idx = token_idxs[start_idx:end_idx]
+            expert_tokens = x[exp_token_idx]
+            expert_out = expert(expert_tokens)
+            expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
+            expert_cache.scatter_reduce_(
+                0,
+                exp_token_idx.view(-1, 1).repeat(1, x.shape[-1]),
+                expert_out,
+                reduce="sum",
+            )
 
-    #     return expert_cache
+        return expert_cache
 
     @torch.no_grad()
     def moe_infer(self, x, topk_ids, topk_weight):
