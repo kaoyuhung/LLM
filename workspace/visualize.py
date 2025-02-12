@@ -8,6 +8,7 @@ from collections import defaultdict
 
 def draw_throughput(folder):
     y_throughput = defaultdict(lambda: defaultdict(list))
+    total_time = defaultdict(list)
 
     for file in os.listdir(folder):
         if not file.startswith("measure_"):
@@ -23,7 +24,7 @@ def draw_throughput(folder):
                 else:
                     continue
 
-        prefill_y, decode_y = [], []
+        prefill_y, decode_y, total_t = [], [], []
         file_path = os.path.join(folder, file)
         with open(file_path, "r") as file:
             lines = file.readlines()
@@ -32,14 +33,16 @@ def draw_throughput(folder):
 
             for line in lines:
                 if line.strip().endswith("tokens/s"):
-                    # print(line.strip())
-                    # print(re.findall(r"\d+\.\d+", line.strip())[-2:])
-                    prefill_t, decode_t = re.findall(r"\d+\.\d+", line.strip())[-2:]
+                    prefill_et, decode_et, prefill_t, decode_t = re.findall(
+                        r"\d+\.\d+", line.strip()
+                    )
+                    total_t.append(round(float(prefill_et)) + round(float(decode_et)))
                     prefill_y.append(round(float(prefill_t)))
                     decode_y.append(round(float(decode_t)))
 
         y_throughput["prefill"][approach] = prefill_y
         y_throughput["decode"][approach] = decode_y
+        total_time[approach] = total_t
 
     assert len(y_throughput["prefill"]) > 0
     x = [
@@ -48,12 +51,30 @@ def draw_throughput(folder):
     ]
     x_indices = range(len(x))
     x = [str(_) for _ in x]
+    versions = ["v0", "v1", "v2", "v3", "PP", "TP", "TP+EP", "EP", "PP+TP", "PP+EP"]
+
+    fig, ax = plt.subplots()
+    ax.set_title(f"elapsed time comparison")
+    ax.set_xticks(x_indices)
+    for version in versions:
+        if version in total_time:
+            ax.plot(
+                x[: len(total_time[version])],
+                total_time[version],
+                label=version,
+                linewidth=1.5,
+                marker="o",
+            )
+    ax.set_xlabel("Batch Size")
+    ax.set_ylabel("Elapsed Time (Lower is better)")
+    ax.legend()
+    plt.savefig(f"{folder}/time_figure")
 
     for stage, y in y_throughput.items():
         fig, ax = plt.subplots()
         ax.set_title(f"{stage} throughput comparison")
         ax.set_xticks(x_indices)
-        versions = ["v0", "v1", "v2", "v3", "PP", "TP", "TP+EP", "EP", "PP+TP", "PP+EP"]
+
         for version in versions:
             if version in y:
                 ax.plot(
@@ -200,6 +221,3 @@ if __name__ == "__main__":
 
     if args.t:
         draw_throughput(args.t)
-
-    # if args.c:
-    #     draw_C(args.c, args.t)
