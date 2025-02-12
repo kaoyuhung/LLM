@@ -18,6 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ PyTorch DeepSeek model."""
+import math
 import os
 import re
 import warnings
@@ -736,10 +737,10 @@ class Transformer(DeepseekV2PreTrainedModel):
             n_process_per_node = get_nproc_per_rank(self.pipeline_rank, device)
             n_process = sum(n_process_per_node)  # == world_size
             n_layers_per_node = [
-                round(n / n_process * config.num_hidden_layers)
+                math.floor(n / n_process * config.num_hidden_layers)
                 for n in n_process_per_node
             ]
-            for i in range(n_process - sum(n_layers_per_node)):
+            for i in range(config.num_hidden_layers - sum(n_layers_per_node)):
                 n_layers_per_node[-i - 1] += 1
             layer_start_idx = sum(n_layers_per_node[: self.pipeline_rank])
             layer_end_idx = layer_start_idx + n_layers_per_node[self.pipeline_rank]
