@@ -2,7 +2,7 @@
 
 #Batch Job Paremeters
 #SBATCH --account=GOV113121
-#SBATCH --partition=normal
+#SBATCH --partition=dev
 #SBATCH --ntasks-per-node=1             # one torchrun per node https://stackoverflow.com/a/65897194
 #SBATCH --cpus-per-gpu=4
 #SBATCH --mail-type=END,BEGIN           # Send the mail when the job starts and finishes.
@@ -18,12 +18,9 @@ fi
 nccl=$1
 nsys=$2
 
-if [ "$SLURM_JOB_NUM_NODES" -eq 1 ]; then
-    if [ ! -z "$nccl" ] && [ "$nccl" = "0" ]; then
-        SRUN_CMD="./run_memcpy_test.sh 0 $nsys"
-    else
-        SRUN_CMD="./run_memcpy_test.sh 1 $nsys $SLURM_CPUS_PER_GPU"
-    fi
+if [ "$SLURM_JOB_NUM_NODES" -eq 1 ]  && [ "$nccl" = "0" ]; then
+    SRUN_CMD="./run_memcpy_test.sh 0 $nsys"
+   
 else
     export UCX_NET_DEVICES=mlx5_0:1
     export UCX_IB_GPU_DIRECT_RDMA=1 # allows direct memory access between the GPU and the network interface (e.g., Mellanox InfiniBand cards)

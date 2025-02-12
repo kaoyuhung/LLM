@@ -40,14 +40,14 @@ def draw_throughput(folder):
                     prefill_y.append(round(float(prefill_t)))
                     decode_y.append(round(float(decode_t)))
 
-        y_throughput["prefill"][approach] = prefill_y
-        y_throughput["decode"][approach] = decode_y
+        y_throughput["Prefill"][approach] = prefill_y
+        y_throughput["Decode"][approach] = decode_y
         total_time[approach] = total_t
 
-    assert len(y_throughput["prefill"]) > 0
+    assert len(y_throughput["Prefill"]) > 0
     x = [
         pow(2, i)
-        for i in range(max([len(y) for y in y_throughput["prefill"].values()]))
+        for i in range(max([len(y) for y in y_throughput["Prefill"].values()]))
     ]
     x_indices = range(len(x))
     x = [str(_) for _ in x]
@@ -66,13 +66,13 @@ def draw_throughput(folder):
                 marker="o",
             )
     ax.set_xlabel("Batch Size")
-    ax.set_ylabel("Elapsed Time (Lower is better)")
+    ax.set_ylabel("Elapsed Time(s) (Lower is better)")
     ax.legend()
     plt.savefig(f"{folder}/time_figure")
 
     for stage, y in y_throughput.items():
         fig, ax = plt.subplots()
-        ax.set_title(f"{stage} throughput comparison")
+        ax.set_title(f"{stage} Throughput Comparison")
         ax.set_xticks(x_indices)
 
         for version in versions:

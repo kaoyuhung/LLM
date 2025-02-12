@@ -10,22 +10,23 @@
 #SBATCH --job-name=INFERENCE
 #SBATCH --output=result/job%j/log.out
 
-if [ $# -lt 4 ]; then
-  echo "Usage: $0 <mode> <eval_nItrs> <model> <model_version>"
+if [ $# -lt 5 ]; then
+  echo "Usage: $0 <mode> <eval_nItrs> <batch_size> <model> <model_version>"
   exit 1
 fi
 
 mode=$1
 eval_nItrs=$2
-model=$3
-model_version=$4
+batch_size=$3
+model=$4
+model_version=$5
 
 # enable NCCL log
 # export NCCL_DEBUG=INFO
 
 if [ "$SLURM_JOB_NUM_NODES" -eq 1 ]; then
 
-  SRUN_CMD="./run_single_node.sh $SLURM_GPUS_PER_NODE $mode $eval_nItrs $model $model_version"
+  SRUN_CMD="./run_single_node.sh $SLURM_GPUS_PER_NODE $mode $eval_nItrs $batch_size $model $model_version"
 
 else
   # net
@@ -36,7 +37,7 @@ else
   head_node=${nodes_array[0]}
   MASTER_ADDR=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
   MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
-  SRUN_CMD="./run_multinode.sh $SLURM_JOB_NUM_NODES $SLURM_GPUS_PER_NODE xxx $MASTER_ADDR:$MASTER_PORT $mode $eval_nItrs $model $model_version" 
+  SRUN_CMD="./run_multinode.sh $SLURM_JOB_NUM_NODES $SLURM_GPUS_PER_NODE xxx $MASTER_ADDR:$MASTER_PORT $mode $eval_nItrs $batch_size $model $model_version" 
 fi
 
 # https://discuss.pytorch.org/t/distributed-training-on-slurm-cluster/150417/8
