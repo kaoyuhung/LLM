@@ -1,15 +1,16 @@
 #!/bin/bash
 
-if [ $# -lt 5 ]; then
-  echo "Usage: $0 <nproc> <mode> <eval_nItrs> <model> <model_version>"
+if [ $# -lt 6 ]; then
+  echo "Usage: $0 <nproc> <mode> <eval_nItrs> <batch_size> <model> <model_version>"
   exit 1
 fi
 
 nproc=${1}
 mode=${2}
 eval_nItrs=${3}
-model=${4}
-model_version=${5}
+batch_size=${4}
+model=${5}
+model_version=${6}
   
 if [ ! -z "$SLURM_NODEID" ]; then
   output_folder="result/job${SLURM_JOB_ID}"
@@ -42,12 +43,12 @@ elif [ $mode = "nsys_profile" ]; then
       --cuda-memory-usage=true \
       --python-backtrace=cuda --trace-fork-before-exec=true \
       -f true -o $output_folder/$output_file \
-      $CMD --max_tokens 5 --batch_size 128
+      $CMD --max_tokens 5 --batch_size $batch_size
 
 elif [ $mode = "profile" ]; then
-    $CMD
+    $CMD --batch_size $batch_size
 
 else
-    $CMD >> $output_folder/$output_file
+    $CMD --batch_size $batch_size >> $output_folder/$output_file
 fi
 

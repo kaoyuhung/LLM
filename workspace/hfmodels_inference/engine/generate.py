@@ -105,7 +105,10 @@ def measure_generate(
     n_decode_tokens = torch.cat(generated_tokens, 1).numel() - B
     return (t1 - t0, t2 - t1, n_prefill_tokens, n_decode_tokens)
 
+
 torch.inference_mode()
+
+
 def nsys_profile_generate(
     prompts: List[str],
     tokenizer: AutoTokenizer,
@@ -115,10 +118,10 @@ def nsys_profile_generate(
     temperature: float,
     top_p: float,
 ):
-    
 
     inputs = tokenizer(prompts, padding=True, return_tensors="pt").to(model.device)
     past_key_values = DynamicCache()
+
     dist.barrier()
     torch.cuda.cudart().cudaProfilerStart()
 
@@ -127,11 +130,11 @@ def nsys_profile_generate(
             torch.cuda.nvtx.range_push(f"{dist.get_rank()} - prefill forward")
         else:
             torch.cuda.nvtx.range_push(f"{dist.get_rank()} - decode forward")
-        
+
         outputs = model(**inputs, past_key_values=past_key_values, use_cache=True)
 
         torch.cuda.nvtx.range_pop()
-        
+
         next_token_ids = sample(
             outputs.logits[:, -1:], temperature=temperature, top_p=top_p
         )
@@ -143,7 +146,6 @@ def nsys_profile_generate(
         )
         inputs = {"input_ids": next_token_ids, "attention_mask": attention_mask}
 
-    
     dist.barrier()
     torch.cuda.cudart().cudaProfilerStop()
     return

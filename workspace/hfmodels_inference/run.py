@@ -13,7 +13,7 @@ import torch.distributed as dist
 from torchinfo import summary
 from util import setup_seed, load_data, get_nnodes
 from engine.utils import getModelandTokenizeer
-from engine.generate import generate, measure_generate
+from engine.generate import generate, measure_generate, nsys_profile_generate
 
 
 def run(
@@ -158,10 +158,10 @@ def run(
                     [prompts[0]],
                     tokenizer,
                     model,
-                    max_tokens=max_tokens,
+                    max_new_tokens=max_tokens,
                     temperature=T,
                     top_p=P,
-                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                    eos_id=model.generation_config.eos_token_id,
                 )
         else:
             for _ in range(warmup_iters):
@@ -169,26 +169,21 @@ def run(
                     [prompts[0]],
                     tokenizer,
                     model,
-                    max_tokens=max_tokens,
+                    max_new_tokens=max_tokens,
                     temperature=T,
                     top_p=P,
-                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
+                    eos_id=model.generation_config.eos_token_id,
                 )
-        dist.barrier()
 
         nsys_profile_generate(
-            [prompts[0]],
+            prompts[:batch_size],
             tokenizer,
             model,
-            max_tokens=5,
+            max_new_tokens=max_tokens,
+            max_batch_size=batch_size,
             temperature=T,
             top_p=P,
-            eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-            distributed=True,
-            local_rank=LOCAL_RANK,
-            local_work_size=LOCAL_WORLD_SIZE,
         )
-        dist.barrier()
 
     elif mode == "profile":
         if LOCAL_RANK == 0:

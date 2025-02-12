@@ -24,7 +24,7 @@ model_version=$4
 # export NCCL_DEBUG=INFO
 
 if [ "$SLURM_JOB_NUM_NODES" -eq 1 ]; then
-  
+
   SRUN_CMD="./run_single_node.sh $SLURM_GPUS_PER_NODE $mode $eval_nItrs $model $model_version"
 
 else

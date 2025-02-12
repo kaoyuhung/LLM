@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ $# -lt 8 ]; then
-  echo "Usage: $0 <nnodes> <nproc> <node_rank> <master_addr:master_port> <mode> <eval_nItrs> <model> <model_version>"
+  echo "Usage: $0 <nnodes> <nproc> <node_rank> <master_addr:master_port> <mode> <eval_nItrs> <batch_size> <model> <model_version>"
   exit 1
 fi
 
@@ -16,8 +16,9 @@ master_addr=${4%%:*}
 master_port=${4##*:}
 mode=${5}
 eval_nItrs=${6}
-model=${7}
-model_version=${8}
+batch_size=${7}
+model=${8}
+model_version=${9}
 
 if [ ! -z "$SLURM_NODEID" ]; then
   output_folder="result/job${SLURM_JOB_ID}"
@@ -53,11 +54,11 @@ elif [ $mode = "nsys_profile" ]; then
     --cuda-memory-usage=true \
     --python-backtrace=cuda --trace-fork-before-exec=true \
     -f true -o $output_folder/$output_file \
-    $CMD --max_tokens 5 --batch_size 128
+    $CMD --max_tokens 5 --batch_size $batch_size
 
 elif [ $mode = "profile" ]; then
-  $CMD
+  $CMD --batch_size $batch_size
 
 else
-  $CMD >> $output_folder/$output_file
+  $CMD --batch_size $batch_size >> $output_folder/$output_file
 fi
