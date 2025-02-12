@@ -5,6 +5,7 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer, DynamicCache
 from util import sample
+from engine.cache import StaticCache
 
 
 @torch.inference_mode()
@@ -13,6 +14,7 @@ def generate(
     tokenizer: AutoTokenizer,
     model,
     max_new_tokens: int,
+    batch_size: int,
     temperature: float,
     top_p: float,
     eos_id: Optional[int] = None,
@@ -24,6 +26,13 @@ def generate(
     is_finished = torch.tensor([False for _ in range(B)])
 
     past_key_values = DynamicCache()
+    # past_key_values = StaticCache(
+    #     config=model.config,
+    #     max_batch_size=batch_size,
+    #     max_cache_len=inputs["input_ids"].shape[1] + max_new_tokens,
+    #     device=model.device,
+    #     dtype=model.dtype,
+    # )
     for _ in range(max_new_tokens):
         outputs = model(**inputs, past_key_values=past_key_values, use_cache=True)
         # next_token_ids = outputs.logits[:, -1:].argmax(-1)
@@ -55,7 +64,7 @@ def measure_generate(
     tokenizer: AutoTokenizer,
     model,
     max_new_tokens: int,
-    max_batch_size: int,
+    batch_size: int,
     temperature: float,
     top_p: float,
     use_cache: bool,
@@ -70,6 +79,13 @@ def measure_generate(
 
     if use_cache:
         past_key_values = DynamicCache()
+        # past_key_values = StaticCache(
+        #     config=model.config,
+        #     max_batch_size=batch_size,
+        #     max_cache_len=inputs["input_ids"].shape[1] + max_new_tokens,
+        #     device=model.device,
+        #     dtype=model.dtype,
+        # )
         for _ in range(max_new_tokens):
             outputs = model(**inputs, past_key_values=past_key_values, use_cache=True)
             if _ == 0:
@@ -114,7 +130,7 @@ def nsys_profile_generate(
     tokenizer: AutoTokenizer,
     model,
     max_new_tokens: int,
-    max_batch_size: int,
+    batch_size: int,
     temperature: float,
     top_p: float,
 ):

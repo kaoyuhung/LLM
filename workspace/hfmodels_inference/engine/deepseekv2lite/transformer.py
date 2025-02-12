@@ -884,15 +884,25 @@ class Transformer(DeepseekV2PreTrainedModel):
                 config.moe_dim_end_idx = moe_dim_end_idx
 
             # For Attn Layer
-            remainder = config.num_attention_heads % self.num_tp_ranks
-            n_heads = config.num_attention_heads // self.num_tp_ranks
+            n_heads_per_group = config.num_attention_heads // config.num_key_value_heads
+            remainder = config.num_key_value_heads % self.num_tp_ranks
+            n_kv_heads = config.num_key_value_heads // self.num_tp_ranks
+            kv_heads_start_idx = self.tp_rank * n_kv_heads
+            n_heads = n_kv_heads * n_heads_per_group
             heads_start_idx = self.tp_rank * n_heads
             if self.num_tp_ranks - self.tp_rank <= remainder:
-                n_heads += 1
-                heads_start_idx += remainder - (self.num_tp_ranks - self.tp_rank)
-
+                n_kv_heads += 1
+                kv_heads_start_idx += remainder - (self.num_tp_ranks - self.tp_rank)
+                n_heads += n_heads_per_group
+                heads_start_idx += (
+                    remainder - (self.num_tp_ranks - self.tp_rank)
+                ) * n_heads_per_group
+            kv_heads_end_idx = kv_heads_start_idx + n_kv_heads
             heads_end_idx = heads_start_idx + n_heads
             config.num_attention_heads = n_heads
+            config.num_key_value_heads = n_kv_heads
+            config.kv_heads_start_idx = kv_heads_start_idx
+            config.kv_heads_end_idx = kv_heads_end_idx
             config.heads_start_idx = heads_start_idx
             config.heads_end_idx = heads_end_idx
 
