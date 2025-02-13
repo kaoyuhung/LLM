@@ -91,6 +91,7 @@ def getModelandTokenizeer(
         )
     elif model_version == "PP+EP":
         assert nnodes > 1
+        assert local_world_size > 1
         model = Transformer.from_pretrained(
             model_path,
             pipeline_rank=node_rank,
@@ -113,6 +114,7 @@ def getModelandTokenizeer(
         )
     elif model_version == "TP+EP":
         assert nnodes > 1
+        assert local_world_size > 1
         model = Transformer.from_pretrained(
             model_path,
             tp_rank=world_rank,

@@ -419,8 +419,8 @@ class MoE(nn.Module):
         orig_shape = hidden_states.shape
         topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        flat_topk_idx = topk_idx.view(-1)
         if self.training:
+            flat_topk_idx = topk_idx.view(-1)
             hidden_states = hidden_states.repeat_interleave(
                 self.num_experts_per_tok, dim=0
             )
@@ -431,15 +431,17 @@ class MoE(nn.Module):
             y = y.view(*orig_shape)
             y = AddAuxiliaryLoss.apply(y, aux_loss)
         else:
-            y = self.moe_infer(
-                hidden_states, flat_topk_idx, topk_weight.view(-1, 1)
-            ).view(*orig_shape)
+            # y = self.moe_infer_default(
+            #     hidden_states, topk_idx.view(-1), topk_weight.view(-1, 1)
+            # ).view(*orig_shape)
+            y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
+
         if self.config.n_shared_experts is not None:
             y = y + self.shared_experts(identity)
         return y
 
     @torch.no_grad()
-    def moe_infer(self, x, flat_expert_indices, flat_expert_weights):
+    def moe_infer_default(self, x, flat_expert_indices, flat_expert_weights):
         expert_cache = torch.zeros_like(x)
         idxs = flat_expert_indices.argsort()
         tokens_per_expert = flat_expert_indices.bincount().cpu().numpy().cumsum(0)
@@ -460,6 +462,35 @@ class MoE(nn.Module):
                 reduce="sum",
             )
         return expert_cache
+
+    @torch.no_grad()
+    def moe_infer(self, x, topk_ids, topk_weight):
+        cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
+        cnts.scatter_(1, topk_ids, 1)
+        tokens_per_expert = cnts.sum(dim=0).cpu().numpy()
+        idxs = topk_ids.view(-1).argsort()
+        sorted_tokens = x[idxs // topk_ids.shape[1]]
+        outputs = []
+        start_idx = 0
+        for i, num_tokens in enumerate(tokens_per_expert):
+            if num_tokens == 0:
+                continue
+            end_idx = start_idx + num_tokens
+            expert = self.experts[i]
+            tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
+            expert_out = expert(tokens_for_this_expert)
+            outputs.append(expert_out)
+            start_idx = end_idx
+
+        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
+        new_x = torch.empty_like(outs)
+        new_x[idxs] = outs
+        final_out = (
+            new_x.view(*topk_ids.shape, -1)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+        )
+        return final_out
 
 
 # Copied from transformers.models.llama.modeling_llama.repeat_kv

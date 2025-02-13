@@ -52,8 +52,9 @@ class MoEEP(nn.Module):
         orig_shape = hidden_states.shape
         topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        flat_topk_idx = topk_idx.view(-1)
+
         if self.training:
+            flat_topk_idx = topk_idx.view(-1)
             hidden_states = hidden_states.repeat_interleave(
                 self.num_experts_per_tok, dim=0
             )
@@ -64,16 +65,23 @@ class MoEEP(nn.Module):
             y = y.view(*orig_shape)
             y = AddAuxiliaryLoss.apply(y, aux_loss)
         else:
-            y = self.moe_infer(
-                hidden_states, flat_topk_idx, topk_weight.view(-1, 1)
-            ).view(*orig_shape)
+            # y_ = self.moe_infer_default(
+            #     hidden_states, topk_idx.view(-1), topk_weight.view(-1, 1)
+            # ).view(*orig_shape)
+            y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
+            # if dist.get_rank() == 0:
+            #     print(torch.max(torch.abs(y_ - y)), torch.mean(torch.abs(y_ - y)))
+            # dist.barrier()
+            # dist.destroy_process_group()
+            # exit()
+
         if self.config.n_shared_experts is not None:
             y = y + self.shared_experts(identity)
         dist.all_reduce(y, group=self.tp_group)
         return y
 
     @torch.no_grad()
-    def moe_infer(self, x, flat_expert_indices, flat_expert_weights):
+    def moe_infer_default(self, x, flat_expert_indices, flat_expert_weights):
         expert_cache = torch.zeros_like(x)
         idxs = flat_expert_indices.argsort()
         tokens_per_expert = flat_expert_indices.bincount().cpu().numpy().cumsum(0)
@@ -99,6 +107,42 @@ class MoEEP(nn.Module):
             )
 
         return expert_cache
+
+    @torch.no_grad()
+    def moe_infer(self, x, topk_ids, topk_weight):
+        cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
+        cnts = cnts.scatter_(1, topk_ids, 1).sum(dim=0)
+        tokens_per_expert = (
+            cnts[self.expert_start_idx : self.expert_end_idx].cpu().numpy()
+        )
+
+        fidx = cnts[: self.expert_start_idx].sum().item()
+        bidx = fidx + cnts[self.expert_start_idx : self.expert_end_idx].sum().item()
+        idxs = topk_ids.view(-1).argsort()
+        token_idxs = idxs[fidx:bidx] // topk_ids.shape[1]
+        sorted_tokens = x[token_idxs]
+
+        outputs = []
+        start_idx = 0
+        for i, num_tokens in enumerate(tokens_per_expert):
+            if num_tokens == 0:
+                continue
+            end_idx = start_idx + num_tokens
+            expert = self.experts[i + self.expert_start_idx]
+            tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
+            expert_out = expert(tokens_for_this_expert)
+            outputs.append(expert_out)
+            start_idx = end_idx
+
+        if len(outputs):
+            outs = torch.cat(outputs, dim=0)
+            new_x = torch.zeros_like(x)
+            outs = outs.mul_(topk_weight.view(-1)[idxs[fidx:bidx]].unsqueeze(dim=-1))
+            return new_x.scatter_reduce_(
+                0, token_idxs.unsqueeze(-1).expand(-1, x.shape[-1]), outs, reduce="sum"
+            )
+        else:
+            return torch.zeros_like(x)
 
 
 class DeepseekDecoderLayerEP(nn.Module):

@@ -122,7 +122,6 @@ class DeepseekV2MoEEP(nn.Module):
         tokens_per_expert = (
             cnts[self.expert_start_idx : self.expert_end_idx].cpu().numpy()
         )
-        # mask = (topk_ids >= self.expert_start_idx) & (topk_ids < self.expert_end_idx)
 
         fidx = cnts[: self.expert_start_idx].sum().item()
         bidx = fidx + cnts[self.expert_start_idx : self.expert_end_idx].sum().item()
@@ -150,7 +149,6 @@ class DeepseekV2MoEEP(nn.Module):
                 .mul_(topk_weight.view(-1)[idxs[fidx:bidx]].unsqueeze(dim=-1))
                 .type(x.dtype)
             )
-
             return new_x.scatter_reduce_(
                 0, token_idxs.unsqueeze(-1).expand(-1, x.shape[-1]), outs, reduce="sum"
             )
