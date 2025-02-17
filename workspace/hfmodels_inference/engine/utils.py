@@ -23,21 +23,21 @@ def getModelandTokenizeer(
     model_path = Path(f"weights/{model_name}")
     if not model_path.exists() and local_rank == 0:
         model_path.mkdir(parents=True, exist_ok=True)
-        if model_name == "deepseek-moe-16b-chat" or model_name == "DeepSeek-V2-Lite":
+        if model_name in ["deepseek-moe-16b-chat", "DeepSeek-V2-Lite", "DeepSeek-R1"]:
             repo_id = "deepseek-ai/" + model_name
 
         snapshot_download(
             repo_id=repo_id,
-            allow_patterns=["*.json", "*.safetensors"],
+            allow_patterns=["*.json", "model-0000*.safetensors"],
             local_dir=model_path,
         )
-
-    dist.barrier()
 
     if model_name == "deepseek-moe-16b-chat":
         from engine.deepseekmoe.transformer import Transformer
     elif model_name == "DeepSeek-V2-Lite":
         from engine.deepseekv2lite.transformer import Transformer
+    elif model_name == "DeepSeek-R1":
+        from engine.deepseekv3.transformer import Transformer
 
     if model_version == "PP":
         model = Transformer.from_pretrained(

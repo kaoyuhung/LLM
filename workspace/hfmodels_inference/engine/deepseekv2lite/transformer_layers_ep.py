@@ -1,17 +1,16 @@
 import warnings
 from typing import Optional, Tuple
 
-import numpy as np
 import torch
 import torch.distributed as dist
 from torch import nn
-from engine.deepseekv2lite.transformer_layers import (
+from.transformer_layers import (
     DeepseekV2MLP,
     DeepseekV2RMSNorm,
     MoEGate,
     AddAuxiliaryLoss,
 )
-from engine.deepseekv2lite.transformer_layers_tp import (
+from .transformer_layers_tp import (
     ATTENTION_CLASSES,
     DeepseekV2MLPTP,
 )

@@ -9,7 +9,7 @@ from torch import nn
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from .configuration_deepseek import DeepseekConfig
-from engine.deepseekmoe.transformer_layers import (
+from .transformer_layers import (
     DeepseekRMSNorm,
     logger,
     apply_rotary_pos_emb,

@@ -30,22 +30,63 @@ import gc
 import json
 import inspect
 import copy
+import warnings
 from packaging import version
 from typing import List, Optional, Tuple, Union, Type
 from multiprocessing import Process
 from zipfile import is_zipfile
+from safetensors import safe_open
 import torch
 import torch.distributed as dist
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import CrossEntropyLoss
+from transformers.safetensors_conversion import auto_conversion
+from transformers.quantizers import AutoHfQuantizer
 from transformers.cache_utils import Cache, DynamicCache
+from transformers.utils.quantization_config import (
+    BitsAndBytesConfig,
+    QuantizationMethod,
+)
+from transformers.utils.hub import get_checkpoint_shard_files
+from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
 )
 from transformers.modeling_utils import PreTrainedModel
+from transformers.cache_utils import Cache, DynamicCache
+from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
+
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+)
+from transformers.modeling_utils import (
+    expand_device_map,
+    is_fsdp_enabled,
+    set_initialized_submodules,
+    get_disk_only_shard_files,
+    check_support_param_buffer_assignment,
+    _load_state_dict_into_model,
+    is_local_dist_rank_0,
+    SpecificPreTrainedModelType,
+    _add_variant,
+    get_state_dict_dtype,
+    no_init_weights,
+    _is_ds_init_called,
+    set_zero3_state,
+    set_quantized_state,
+    _load_state_dict_into_meta_model,
+    PreTrainedModel,
+)
+from transformers.integrations import deepspeed_config, is_deepspeed_zero3_enabled
+from transformers.pytorch_utils import (
+    id_tensor_storage,
+    is_torch_greater_or_equal_than_1_13,
+)
+from transformers.generation import GenerationConfig
 from transformers.utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
@@ -72,38 +113,6 @@ from transformers.utils import (
     has_file,
     ContextManagers,
 )
-from transformers.modeling_utils import (
-    expand_device_map,
-    is_fsdp_enabled,
-    set_initialized_submodules,
-    get_disk_only_shard_files,
-    check_support_param_buffer_assignment,
-    _load_state_dict_into_model,
-    is_local_dist_rank_0,
-    SpecificPreTrainedModelType,
-    _add_variant,
-    get_state_dict_dtype,
-    no_init_weights,
-    _is_ds_init_called,
-    set_zero3_state,
-    set_quantized_state,
-    _load_state_dict_into_meta_model,
-)
-from transformers.integrations import deepspeed_config, is_deepspeed_zero3_enabled
-from transformers.pytorch_utils import (
-    id_tensor_storage,
-    is_torch_greater_or_equal_than_1_13,
-)
-from transformers.utils.quantization_config import (
-    BitsAndBytesConfig,
-    QuantizationMethod,
-)
-from transformers.configuration_utils import PretrainedConfig
-from transformers.quantizers import AutoHfQuantizer
-from transformers.safetensors_conversion import auto_conversion
-from transformers.utils.hub import get_checkpoint_shard_files
-from transformers.generation import GenerationConfig
-from safetensors import safe_open
 from accelerate import dispatch_model, infer_auto_device_map, init_empty_weights
 from accelerate.utils import (
     save_offload_index,
@@ -114,25 +123,16 @@ from accelerate.utils import (
     get_max_memory,
     check_tied_parameters_on_same_device,
 )
-from .transformer_layers import (
-    DeepseekV2DecoderLayer,
-    DeepseekV2RMSNorm,
-    logger,
-    _CONFIG_FOR_DOC,
-)
-from .transformer_layers_tp import (
-    ParallelEmbedding,
-    ColumnParallelLinear,
-    DeepseekV2DecoderLayerTP,
-)
-from .transformer_layers_ep import DeepseekV2DecoderLayerEP
+from .configuration_deepseek import DeepseekV3Config
+from .transformer_layers import DeepseekV3DecoderLayer, DeepseekV3RMSNorm, logger
 from util import get_nproc_per_rank
-from .configuration_deepseek import DeepseekV2Config
+
+_CONFIG_FOR_DOC = "DeepseekV3Config"
 
 
 def load_state_dict(
     checkpoint_file: Union[str, os.PathLike],
-    config: DeepseekV2Config,
+    config: DeepseekV3Config,
     is_quantized: bool = False,
     map_location: Optional[Union[str, torch.device]] = None,
     weights_only: bool = True,
@@ -172,6 +172,9 @@ def load_state_dict(
                     f"The safetensors archive passed at {checkpoint_file} does not contain the valid metadata. Make sure "
                     "you save your model with the `save_pretrained` method."
                 )
+            for param_name in f.keys():
+                print(param_name)
+            return
             for param_name in f.keys():
                 if param_name.startswith("model.layers"):
                     layer_id = int(param_name.split(".")[2])
@@ -305,7 +308,7 @@ def load_state_dict(
             )
 
 
-DeepseekV2_START_DOCSTRING = r"""
+DeepseekV3_START_DOCSTRING = r"""
     This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
     library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
     etc.)
@@ -315,7 +318,7 @@ DeepseekV2_START_DOCSTRING = r"""
     and behavior.
 
     Parameters:
-        config ([`DeepseekV2Config`]):
+        config ([`DeepseekV3Config`]):
             Model configuration class with all the parameters of the model. Initializing with a config file does not
             load the weights associated with the model, only the configuration. Check out the
             [`~PreTrainedModel.from_pretrained`] method to load the model weights.
@@ -323,14 +326,14 @@ DeepseekV2_START_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare DeepseekV2 Model outputting raw hidden-states without any specific head on top.",
-    DeepseekV2_START_DOCSTRING,
+    "The bare DeepseekV3 Model outputting raw hidden-states without any specific head on top.",
+    DeepseekV3_START_DOCSTRING,
 )
-class DeepseekV2PreTrainedModel(PreTrainedModel):
-    config_class = DeepseekV2Config
+class DeepseekV3PreTrainedModel(PreTrainedModel):
+    config_class = DeepseekV3Config
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["DeepseekV2DecoderLayer"]
+    _no_split_modules = ["DeepseekV3DecoderLayer"]
     _skip_keys_device_placement = "past_key_values"
     _supports_flash_attn_2 = True
     _supports_cache_class = True
@@ -347,7 +350,7 @@ class DeepseekV2PreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
-DeepseekV2_INPUTS_DOCSTRING = r"""
+DeepseekV3_INPUTS_DOCSTRING = r"""
     Args:
         input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
             Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
@@ -418,20 +421,20 @@ DeepseekV2_INPUTS_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare DeepseekV2 Model outputting raw hidden-states without any specific head on top.",
-    DeepseekV2_START_DOCSTRING,
+    "The bare DeepseekV3 Model outputting raw hidden-states without any specific head on top.",
+    DeepseekV3_START_DOCSTRING,
 )
-class DeepseekV2Model(DeepseekV2PreTrainedModel):
+class DeepseekV3Model(DeepseekV3PreTrainedModel):
     """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`DeepseekV2DecoderLayer`]
+    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`DeepseekV3DecoderLayer`]
 
     Args:
-        config: DeepseekV2Config
+        config: DeepseekV3Config
     """
 
     def __init__(
         self,
-        config: DeepseekV2Config,
+        config: DeepseekV3Config,
         pipeline_rank: int = 0,
         num_pipeline_ranks: int = 1,
         tp_rank: int = 0,
@@ -439,8 +442,8 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         tp_group: Optional[dist.distributed_c10d.ProcessGroup] = None,
         num_ep_ranks: Optional[int] = None,
     ):
-
         super().__init__(config)
+
         self.hidden_size = config.hidden_size
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -455,36 +458,36 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
                 self.embed_tokens = nn.Embedding(
                     config.vocab_size, self.hidden_size, self.padding_idx
                 )
-            else:
-                self.embed_tokens = ParallelEmbedding(
-                    config.tp_vocab_size,
-                    self.hidden_size,
-                    config.vocab_start_idx,
-                    config.vocab_end_idx,
-                    self.padding_idx,
-                    self.tp_group,
-                )
+            # else:
+            #     self.embed_tokens = ParallelEmbedding(
+            #         config.tp_vocab_size,
+            #         self.hidden_size,
+            #         config.vocab_start_idx,
+            #         config.vocab_end_idx,
+            #         self.padding_idx,
+            #         self.tp_group,
+            #     )
         else:
             self.embed_tokens: Optional[nn.Embedding] = None
 
         if self.num_tp_ranks == 1:
             layers = [
-                DeepseekV2DecoderLayer(config, layer_idx)
+                DeepseekV3DecoderLayer(config, layer_idx)
                 for layer_idx in range(config.num_hidden_layers)
             ]
-        else:
-            if num_ep_ranks != None:
-                layers = [
-                    DeepseekV2DecoderLayerEP(
-                        config, layer_idx, self.tp_group, num_ep_ranks
-                    )
-                    for layer_idx in range(config.num_hidden_layers)
-                ]
-            else:
-                layers = [
-                    DeepseekV2DecoderLayerTP(config, layer_idx, self.tp_group)
-                    for layer_idx in range(config.num_hidden_layers)
-                ]
+        # else:
+        #     if num_ep_ranks != None:
+        #         layers = [
+        #             DeepseekV2DecoderLayerEP(
+        #                 config, layer_idx, self.tp_group, num_ep_ranks
+        #             )
+        #             for layer_idx in range(config.num_hidden_layers)
+        #         ]
+        #     else:
+        #         layers = [
+        #             DeepseekV2DecoderLayerTP(config, layer_idx, self.tp_group)
+        #             for layer_idx in range(config.num_hidden_layers)
+        #         ]
 
         self.layers = nn.ModuleDict(
             {
@@ -492,12 +495,13 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
                 for i in range(config.layer_start_idx, config.layer_end_idx)
             }
         )
+
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
 
         if pipeline_rank == self.num_pipeline_ranks - 1:
-            self.norm = DeepseekV2RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
+            self.norm = DeepseekV3RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
         else:
-            self.norm: Optional[DeepseekV2RMSNorm] = None
+            self.norm: Optional[DeepseekV3RMSNorm] = None
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -509,7 +513,7 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    @add_start_docstrings_to_model_forward(DeepseekV2_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(DeepseekV3_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -549,13 +553,6 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
             batch_size, seq_length = inputs_embeds.shape[:2]
         else:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
-
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`transformers."
-                )
-                use_cache = False
 
         past_key_values_length = 0
         if use_cache:
@@ -619,29 +616,18 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers.values():
+        for decoder_layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    position_ids,
-                    past_key_values,
-                    output_attentions,
-                    use_cache,
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                )
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+            )
 
             hidden_states = layer_outputs[0]
 
@@ -685,7 +671,7 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         )
 
 
-class Transformer(DeepseekV2PreTrainedModel):
+class Transformer(DeepseekV3PreTrainedModel):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(
@@ -917,7 +903,7 @@ class Transformer(DeepseekV2PreTrainedModel):
             # dist.destroy_process_group()
             # exit()
 
-        self.model = DeepseekV2Model(
+        self.model = DeepseekV3Model(
             config,
             pipeline_rank=pipeline_rank,
             num_pipeline_ranks=num_pipeline_ranks,
@@ -932,14 +918,14 @@ class Transformer(DeepseekV2PreTrainedModel):
                 self.lm_head = nn.Linear(
                     config.hidden_size, config.vocab_size, bias=False
                 )
-            else:
-                self.lm_head = ColumnParallelLinear(
-                    config.hidden_size,
-                    config.tp_vocab_size,
-                    self.num_tp_ranks,
-                    tp_group,
-                    bias=False,
-                )
+            # else:
+            #     self.lm_head = ColumnParallelLinear(
+            #         config.hidden_size,
+            #         config.tp_vocab_size,
+            #         self.num_tp_ranks,
+            #         tp_group,
+            #         bias=False,
+            #     )
         else:
             self.lm_head: Optional[nn.Linear] = None
 
@@ -964,7 +950,7 @@ class Transformer(DeepseekV2PreTrainedModel):
     def get_decoder(self):
         return self.model
 
-    @add_start_docstrings_to_model_forward(DeepseekV2_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(DeepseekV3_INPUTS_DOCSTRING)
     @replace_return_docstrings(
         output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
     )
@@ -993,9 +979,9 @@ class Transformer(DeepseekV2PreTrainedModel):
         Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, DeepseekV2ForCausalLM
+        >>> from transformers import AutoTokenizer, DeepseekV3ForCausalLM
 
-        >>> model = DeepseekV2ForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
+        >>> model = DeepseekV3ForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
         >>> tokenizer = AutoTokenizer.from_pretrained(PATH_TO_CONVERTED_TOKENIZER)
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
@@ -3079,7 +3065,8 @@ class Transformer(DeepseekV2PreTrainedModel):
                 # force memory release
                 del state_dict
                 gc.collect()
-
+            dist.destroy_process_group()
+            exit()
             if offload_index is not None and len(offload_index) > 0:
                 if model != model_to_load:
                     # We need to add the prefix of the base model

@@ -8,7 +8,7 @@ from torch import nn
 from transformers.activations import ACT2FN
 from transformers.utils import is_flash_attn_greater_or_equal_2_10
 from transformers.cache_utils import Cache
-from engine.deepseekv2lite.transformer_layers import (
+from .transformer_layers import (
     DeepseekV2MLP,
     DeepseekV2RMSNorm,
     MoEGate,

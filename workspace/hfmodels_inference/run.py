@@ -257,7 +257,7 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="deepseek-moe-16b-chat",
-        choices=["deepseek-moe-16b-chat", "DeepSeek-V2-Lite"],
+        choices=["deepseek-moe-16b-chat", "DeepSeek-V2-Lite", "DeepSeek-R1"],
     )
     parser.add_argument("--max_tokens", type=int, default=128)
     parser.add_argument("--T", type=float, default=0, help="temperature")

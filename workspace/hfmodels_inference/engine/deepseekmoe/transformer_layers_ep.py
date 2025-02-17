@@ -5,13 +5,13 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from .configuration_deepseek import DeepseekConfig
-from engine.deepseekmoe.transformer_layers import (
+from .transformer_layers import (
     DeepseekRMSNorm,
     AddAuxiliaryLoss,
     MoEGate,
     DeepseekMLP,
 )
-from engine.deepseekmoe.transformer_layers_tp import (
+from .transformer_layers_tp import (
     Deepseek_ATTENTION_CLASSES,
     DeepseekMLPTP,
 )
