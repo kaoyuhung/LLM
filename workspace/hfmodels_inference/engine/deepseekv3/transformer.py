@@ -125,6 +125,12 @@ from accelerate.utils import (
 )
 from .configuration_deepseek import DeepseekV3Config
 from .transformer_layers import DeepseekV3DecoderLayer, DeepseekV3RMSNorm, logger
+from .transformer_layers_tp import (
+    ColumnParallelLinear,
+    ParallelEmbedding,
+    DeepseekV3DecoderLayerTP,
+)
+from .transformer_layers_ep import DeepseekV3DecoderLayerEP
 from util import get_nproc_per_rank
 
 _CONFIG_FOR_DOC = "DeepseekV3Config"
@@ -166,15 +172,14 @@ def load_state_dict(
         # Check format of the archive
         state_dict = {}
         with safe_open(checkpoint_file, framework="pt") as f:
-            metadata = f.metadata()
-            if metadata.get("format") not in ["pt", "tf", "flax", "mlx"]:
-                raise OSError(
-                    f"The safetensors archive passed at {checkpoint_file} does not contain the valid metadata. Make sure "
-                    "you save your model with the `save_pretrained` method."
-                )
-            for param_name in f.keys():
-                print(param_name)
-            return
+            # metadata = f.metadata()
+            # print(metadata.get("format"))
+            # if metadata.get("format") not in ["pt", "tf", "flax", "mlx"]:
+            #     raise OSError(
+            #         f"The safetensors archive passed at {checkpoint_file} does not contain the valid metadata. Make sure "
+            #         "you save your model with the `save_pretrained` method."
+            #     )
+
             for param_name in f.keys():
                 if param_name.startswith("model.layers"):
                     layer_id = int(param_name.split(".")[2])
@@ -201,9 +206,14 @@ def load_state_dict(
 
                 param = f.get_tensor(param_name)
                 key = param_name.split(".")[-2]
+
                 if key == "embed_tokens" and vocab_start_idx != None:
                     param = param[vocab_start_idx:vocab_end_idx]
                 elif key == "q_proj" and heads_start_idx != None:
+                    param = param[
+                        q_head_dim * heads_start_idx : q_head_dim * heads_end_idx
+                    ]
+                elif key == "q_b_proj" and heads_start_idx != None:
                     param = param[
                         q_head_dim * heads_start_idx : q_head_dim * heads_end_idx
                     ]
@@ -458,15 +468,15 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
                 self.embed_tokens = nn.Embedding(
                     config.vocab_size, self.hidden_size, self.padding_idx
                 )
-            # else:
-            #     self.embed_tokens = ParallelEmbedding(
-            #         config.tp_vocab_size,
-            #         self.hidden_size,
-            #         config.vocab_start_idx,
-            #         config.vocab_end_idx,
-            #         self.padding_idx,
-            #         self.tp_group,
-            #     )
+            else:
+                self.embed_tokens = ParallelEmbedding(
+                    config.tp_vocab_size,
+                    self.hidden_size,
+                    config.vocab_start_idx,
+                    config.vocab_end_idx,
+                    self.padding_idx,
+                    self.tp_group,
+                )
         else:
             self.embed_tokens: Optional[nn.Embedding] = None
 
@@ -475,19 +485,17 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
                 DeepseekV3DecoderLayer(config, layer_idx)
                 for layer_idx in range(config.num_hidden_layers)
             ]
-        # else:
-        #     if num_ep_ranks != None:
-        #         layers = [
-        #             DeepseekV2DecoderLayerEP(
-        #                 config, layer_idx, self.tp_group, num_ep_ranks
-        #             )
-        #             for layer_idx in range(config.num_hidden_layers)
-        #         ]
-        #     else:
-        #         layers = [
-        #             DeepseekV2DecoderLayerTP(config, layer_idx, self.tp_group)
-        #             for layer_idx in range(config.num_hidden_layers)
-        #         ]
+        else:
+            if num_ep_ranks != None:
+                layers = [
+                    DeepseekV3DecoderLayerEP(config, layer_idx, self.tp_group)
+                    for layer_idx in range(config.num_hidden_layers)
+                ]
+            else:
+                layers = [
+                    DeepseekV3DecoderLayerTP(config, layer_idx, self.tp_group)
+                    for layer_idx in range(config.num_hidden_layers)
+                ]
 
         self.layers = nn.ModuleDict(
             {
@@ -616,7 +624,7 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers:
+        for decoder_layer in self.layers.values():
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -918,14 +926,14 @@ class Transformer(DeepseekV3PreTrainedModel):
                 self.lm_head = nn.Linear(
                     config.hidden_size, config.vocab_size, bias=False
                 )
-            # else:
-            #     self.lm_head = ColumnParallelLinear(
-            #         config.hidden_size,
-            #         config.tp_vocab_size,
-            #         self.num_tp_ranks,
-            #         tp_group,
-            #         bias=False,
-            #     )
+            else:
+                self.lm_head = ColumnParallelLinear(
+                    config.hidden_size,
+                    config.tp_vocab_size,
+                    self.num_tp_ranks,
+                    tp_group,
+                    bias=False,
+                )
         else:
             self.lm_head: Optional[nn.Linear] = None
 
@@ -3065,8 +3073,7 @@ class Transformer(DeepseekV3PreTrainedModel):
                 # force memory release
                 del state_dict
                 gc.collect()
-            dist.destroy_process_group()
-            exit()
+
             if offload_index is not None and len(offload_index) > 0:
                 if model != model_to_load:
                     # We need to add the prefix of the base model

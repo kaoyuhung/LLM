@@ -475,9 +475,7 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         else:
             if num_ep_ranks != None:
                 layers = [
-                    DeepseekV2DecoderLayerEP(
-                        config, layer_idx, self.tp_group, num_ep_ranks
-                    )
+                    DeepseekV2DecoderLayerEP(config, layer_idx, self.tp_group)
                     for layer_idx in range(config.num_hidden_layers)
                 ]
             else:

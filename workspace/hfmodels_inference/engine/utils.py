@@ -4,7 +4,6 @@ import torch.distributed as dist
 from transformers import AutoTokenizer
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer, GenerationConfig
-from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
 
 def getModelandTokenizeer(
@@ -28,7 +27,7 @@ def getModelandTokenizeer(
 
         snapshot_download(
             repo_id=repo_id,
-            allow_patterns=["*.json", "model-0000*.safetensors"],
+            allow_patterns=["*.json", "model-*.safetensors"],
             local_dir=model_path,
         )
 
@@ -150,7 +149,11 @@ def getModelandTokenizeer(
             device_map=device,
         )
 
-    if model_name == "deepseek-moe-16b-chat" or model_name == "DeepSeek-V2-Lite":
+    if (
+        model_name == "deepseek-moe-16b-chat"
+        or model_name == "DeepSeek-V2-Lite"
+        or model_name == "DeepSeek-R1"
+    ):
         model.generation_config = GenerationConfig.from_pretrained(model_path)
         model.generation_config.pad_token_id = model.generation_config.eos_token_id
         tokenizer = AutoTokenizer.from_pretrained(model_path)

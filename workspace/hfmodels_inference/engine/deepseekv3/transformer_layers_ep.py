@@ -4,20 +4,15 @@ from typing import Optional, Tuple
 import torch
 import torch.distributed as dist
 from torch import nn
-from .transformer_layers import (
-    DeepseekV2MLP,
-    DeepseekV2RMSNorm,
-    MoEGate,
-    AddAuxiliaryLoss,
-)
+from .transformer_layers import DeepseekV3MLP, DeepseekV3RMSNorm, MoEGate
 from .transformer_layers_tp import (
     ATTENTION_CLASSES,
-    DeepseekV2MLPTP,
+    DeepseekV3MLPTP,
 )
-from .configuration_deepseek import DeepseekV2Config
+from .configuration_deepseek import DeepseekV3Config
 
 
-class DeepseekV2MoEEP(nn.Module):
+class DeepseekV3MoEEP(nn.Module):
     """
     A mixed expert module containing shared experts.
     """
@@ -25,15 +20,16 @@ class DeepseekV2MoEEP(nn.Module):
     def __init__(self, config, tp_group):
         super().__init__()
         self.config = config
-        self.num_experts_per_tok = config.num_experts_per_tok
         self.tp_group = tp_group
         self.expert_start_idx = config.expert_start_idx
         self.expert_end_idx = config.expert_end_idx
+        self.num_experts_per_tok = config.num_experts_per_tok
+        self.experts_per_rank = config.n_routed_experts
 
         self.experts = nn.ModuleList(
             [
                 (
-                    DeepseekV2MLP(
+                    DeepseekV3MLP(
                         config, intermediate_size=config.moe_intermediate_size
                     )
                     if i >= self.expert_start_idx and i < self.expert_end_idx
@@ -45,72 +41,21 @@ class DeepseekV2MoEEP(nn.Module):
         self.gate = MoEGate(config)
         if config.n_shared_experts is not None:
             assert config.shared_moe_intermediate_size is not None
-            self.shared_experts = DeepseekV2MLP(
+            self.shared_experts = DeepseekV3MLP(
                 config=config, intermediate_size=config.shared_moe_intermediate_size
             )
 
     def forward(self, hidden_states):
         identity = hidden_states
         orig_shape = hidden_states.shape
-        topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
+        topk_idx, topk_weight = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        if self.training:
-            flat_topk_idx = topk_idx.view(-1)
-            hidden_states = hidden_states.repeat_interleave(
-                self.num_experts_per_tok, dim=0
-            )
-            y = torch.empty_like(hidden_states)
-            for i, expert in enumerate(self.experts):
-                y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i])
-            y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
-            y = y.to(hidden_states.dtype).view(*orig_shape)
-            y = AddAuxiliaryLoss.apply(y, aux_loss)
-        else:
-            # y_ = self.moe_infer_default(
-            #     hidden_states, topk_idx.view(-1), topk_weight.view(-1, 1)
-            # ).view(*orig_shape)
-            # y_ = self.moe_infer_slow(hidden_states, topk_idx, topk_weight).view(
-            #     *orig_shape
-            # )
+        if not self.training:
             y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
-
-            # if dist.get_rank() == 0:
-            #     print(torch.max(torch.abs(y_ - y)))
-            # dist.barrier()
-            # dist.destroy_process_group()
-            # exit()
         if self.config.n_shared_experts is not None:
             y = y + self.shared_experts(identity)
         dist.all_reduce(y, group=self.tp_group)
         return y
-
-    @torch.no_grad()
-    def moe_infer_default(self, x, flat_expert_indices, flat_expert_weights):
-        expert_cache = torch.zeros_like(x)
-        idxs = flat_expert_indices.argsort()
-        tokens_per_expert = flat_expert_indices.bincount().cpu().numpy().cumsum(0)
-        token_idxs = idxs // self.num_experts_per_tok
-
-        for i in range(
-            self.expert_start_idx, min(self.expert_end_idx, len(tokens_per_expert))
-        ):
-            start_idx = 0 if i == 0 else tokens_per_expert[i - 1]
-            end_idx = tokens_per_expert[i]
-            if start_idx == end_idx:
-                continue
-            expert = self.experts[i]
-            exp_token_idx = token_idxs[start_idx:end_idx]
-            expert_tokens = x[exp_token_idx]
-            expert_out = expert(expert_tokens)
-            expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
-            expert_cache.scatter_reduce_(
-                0,
-                exp_token_idx.view(-1, 1).repeat(1, x.shape[-1]),
-                expert_out,
-                reduce="sum",
-            )
-
-        return expert_cache
 
     @torch.no_grad()
     def moe_infer(self, x, topk_ids, topk_weight):
@@ -152,25 +97,11 @@ class DeepseekV2MoEEP(nn.Module):
         else:
             return torch.zeros_like(x)
 
-    @torch.no_grad()
-    def moe_infer_slow(self, x, topk_ids, topk_weight):
-        expert_cache = torch.zeros_like(x)
 
-        for i in range(self.expert_start_idx, self.expert_end_idx):
-            batch_idx, nth_expert = torch.where(topk_ids == i)
-            if batch_idx.numel() != 0:
-                expert = self.experts[i]
-                expert_cache[batch_idx] += topk_weight[
-                    batch_idx, nth_expert, None
-                ] * expert(x[batch_idx])
-
-        return expert_cache
-
-
-class DeepseekV2DecoderLayerEP(nn.Module):
+class DeepseekV3DecoderLayerEP(nn.Module):
     def __init__(
         self,
-        config: DeepseekV2Config,
+        config: DeepseekV3Config,
         layer_idx: int,
         tp_group: dist.distributed_c10d.ProcessGroup,
     ):
@@ -180,19 +111,20 @@ class DeepseekV2DecoderLayerEP(nn.Module):
         self.self_attn = ATTENTION_CLASSES[config._attn_implementation](
             config=config, layer_idx=layer_idx, tp_group=tp_group
         )
+
         self.mlp = (
-            DeepseekV2MoEEP(config, tp_group)
+            DeepseekV3MoEEP(config, tp_group=tp_group)
             if (
                 config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
                 and layer_idx % config.moe_layer_freq == 0
             )
-            else DeepseekV2MLPTP(config, tp_group=tp_group)
+            else DeepseekV3MLPTP(config, tp_group=tp_group)
         )
-        self.input_layernorm = DeepseekV2RMSNorm(
+        self.input_layernorm = DeepseekV3RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.post_attention_layernorm = DeepseekV2RMSNorm(
+        self.post_attention_layernorm = DeepseekV3RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
 
