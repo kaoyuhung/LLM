@@ -257,7 +257,12 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="deepseek-moe-16b-chat",
-        choices=["deepseek-moe-16b-chat", "DeepSeek-V2-Lite", "DeepSeek-R1"],
+        choices=[
+            "deepseek-moe-16b-chat",
+            "DeepSeek-V2-Lite",
+            "DeepSeek-R1",
+            "Mixtral-8x7B-Instruct-v0.1",
+        ],
     )
     parser.add_argument("--max_tokens", type=int, default=128)
     parser.add_argument("--T", type=float, default=0, help="temperature")
@@ -298,7 +303,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dtype", type=str, default="bfloat16", choices=["float16", "bfloat16"]
     )
-    parser.add_argument("--torch_compile", type=eval, default=False)
     parser.add_argument(
         "--model_version",
         type=str,

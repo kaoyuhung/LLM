@@ -24,6 +24,8 @@ def getModelandTokenizeer(
         model_path.mkdir(parents=True, exist_ok=True)
         if model_name in ["deepseek-moe-16b-chat", "DeepSeek-V2-Lite", "DeepSeek-R1"]:
             repo_id = "deepseek-ai/" + model_name
+        elif model_name == "Mixtral-8x7B-Instruct-v0.1":
+            repo_id = "mistralai/" + model_name
 
         snapshot_download(
             repo_id=repo_id,
@@ -31,12 +33,18 @@ def getModelandTokenizeer(
             local_dir=model_path,
         )
 
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+
     if model_name == "deepseek-moe-16b-chat":
         from engine.deepseekmoe.transformer import Transformer
     elif model_name == "DeepSeek-V2-Lite":
         from engine.deepseekv2lite.transformer import Transformer
     elif model_name == "DeepSeek-R1":
         from engine.deepseekv3.transformer import Transformer
+    elif model_name == "Mixtral-8x7B-Instruct-v0.1":
+        from engine.mixtral8x7Binstruct.transformer import Transformer
+
+        tokenizer.pad_token = tokenizer.eos_token
 
     if model_version == "PP":
         model = Transformer.from_pretrained(
@@ -149,13 +157,8 @@ def getModelandTokenizeer(
             device_map=device,
         )
 
-    if (
-        model_name == "deepseek-moe-16b-chat"
-        or model_name == "DeepSeek-V2-Lite"
-        or model_name == "DeepSeek-R1"
-    ):
+    if model_name in ["deepseek-moe-16b-chat", "DeepSeek-V2-Lite", "DeepSeek-R1"]:
         model.generation_config = GenerationConfig.from_pretrained(model_path)
         model.generation_config.pad_token_id = model.generation_config.eos_token_id
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     return model, tokenizer
