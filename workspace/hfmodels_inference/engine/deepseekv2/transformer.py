@@ -137,6 +137,9 @@ def load_state_dict(
     map_location: Optional[Union[str, torch.device]] = None,
     weights_only: bool = True,
 ):
+    
+    if not os.path.exists(checkpoint_file):
+        return {}
     """
     Reads a PyTorch checkpoint file, returning properly formatted errors if they arise.
     """
@@ -201,6 +204,10 @@ def load_state_dict(
                 if key == "embed_tokens" and vocab_start_idx != None:
                     param = param[vocab_start_idx:vocab_end_idx]
                 elif key == "q_proj" and heads_start_idx != None:
+                    param = param[
+                        q_head_dim * heads_start_idx : q_head_dim * heads_end_idx
+                    ]
+                elif key == "q_b_proj" and heads_start_idx != None:
                     param = param[
                         q_head_dim * heads_start_idx : q_head_dim * heads_end_idx
                     ]

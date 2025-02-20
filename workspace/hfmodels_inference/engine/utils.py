@@ -22,7 +22,12 @@ def getModelandTokenizeer(
     model_path = Path(f"weights/{model_name}")
     if not model_path.exists() and local_rank == 0:
         model_path.mkdir(parents=True, exist_ok=True)
-        if model_name in ["deepseek-moe-16b-chat", "DeepSeek-V2-Lite", "DeepSeek-R1"]:
+        if model_name in [
+            "deepseek-moe-16b-chat",
+            "DeepSeek-V2-Lite",
+            "DeepSeek-V2-Chat",
+            "DeepSeek-R1",
+        ]:
             repo_id = "deepseek-ai/" + model_name
         elif model_name == "Mixtral-8x7B-Instruct-v0.1":
             repo_id = "mistralai/" + model_name
@@ -37,8 +42,8 @@ def getModelandTokenizeer(
 
     if model_name == "deepseek-moe-16b-chat":
         from engine.deepseekmoe.transformer import Transformer
-    elif model_name == "DeepSeek-V2-Lite":
-        from engine.deepseekv2lite.transformer import Transformer
+    elif model_name == "DeepSeek-V2-Lite" or model_name == "DeepSeek-V2-Chat":
+        from engine.deepseekv2.transformer import Transformer
     elif model_name == "DeepSeek-R1":
         from engine.deepseekv3.transformer import Transformer
     elif model_name == "Mixtral-8x7B-Instruct-v0.1":
@@ -157,7 +162,11 @@ def getModelandTokenizeer(
             device_map=device,
         )
 
-    if model_name in ["deepseek-moe-16b-chat", "DeepSeek-V2-Lite", "DeepSeek-R1"]:
+    if model_name in [
+        "deepseek-moe-16b-chat",
+        "DeepSeek-V2-Lite",
+        "DeepSeek-V2-Chat" "DeepSeek-R1",
+    ]:
         model.generation_config = GenerationConfig.from_pretrained(model_path)
         model.generation_config.pad_token_id = model.generation_config.eos_token_id
 

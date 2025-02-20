@@ -260,6 +260,7 @@ if __name__ == "__main__":
         choices=[
             "deepseek-moe-16b-chat",
             "DeepSeek-V2-Lite",
+            "DeepSeek-V2-Chat",
             "DeepSeek-R1",
             "Mixtral-8x7B-Instruct-v0.1",
         ],
