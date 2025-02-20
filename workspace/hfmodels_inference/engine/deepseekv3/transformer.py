@@ -143,6 +143,9 @@ def load_state_dict(
     map_location: Optional[Union[str, torch.device]] = None,
     weights_only: bool = True,
 ):
+    if not os.path.exists(checkpoint_file):
+        return {}
+
     """
     Reads a PyTorch checkpoint file, returning properly formatted errors if they arise.
     """
