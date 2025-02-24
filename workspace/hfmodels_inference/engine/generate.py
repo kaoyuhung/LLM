@@ -40,7 +40,11 @@ def generate(
             outputs.logits[:, -1:], temperature=temperature, top_p=top_p
         )
         if eos_id is not None:
-            is_finished = is_finished | (next_token_ids == eos_id).cpu()
+            if isinstance(eos_id, list):
+                for id in eos_id:
+                    is_finished = is_finished | (next_token_ids == id).cpu()
+            else:
+                is_finished = is_finished | (next_token_ids == eos_id).cpu()
         if is_finished.all():
             break
         next_token_ids = next_token_ids[:, None]

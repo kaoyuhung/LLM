@@ -263,6 +263,7 @@ if __name__ == "__main__":
             "DeepSeek-V2-Chat",
             "DeepSeek-R1",
             "Mixtral-8x7B-Instruct-v0.1",
+            "Qwen1.5-MoE-A2.7B-Chat",
         ],
     )
     parser.add_argument("--max_tokens", type=int, default=128)
@@ -299,7 +300,6 @@ if __name__ == "__main__":
     )
     parser.add_argument("--eval_nItrs", type=int, default=1)
     parser.add_argument("--warmup_iters", type=int, default=1)
-    parser.add_argument("--node-id", type=int)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument(
         "--dtype", type=str, default="bfloat16", choices=["float16", "bfloat16"]

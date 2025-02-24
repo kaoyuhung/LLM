@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2023 DeepSeek-AI and The HuggingFace Inc. team. All rights reserved.
+# Copyright 2024 The Qwen team, Alibaba Group and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
 # and OPT implementations in this library. It has been modified from its
@@ -17,8 +17,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" PyTorch DeepSeek model."""
-import math
+"""PyTorch Qwen2MoE model."""
 import os
 import re
 import itertools
@@ -30,16 +29,17 @@ import json
 import inspect
 import copy
 import warnings
+import math
 from packaging import version
 from typing import List, Optional, Tuple, Union, Type
 from multiprocessing import Process
 from zipfile import is_zipfile
 from safetensors import safe_open
+
 import torch
 import torch.distributed as dist
 import torch.utils.checkpoint
 from torch import nn
-from torch.nn import CrossEntropyLoss
 from transformers.safetensors_conversion import auto_conversion
 from transformers.quantizers import AutoHfQuantizer
 from transformers.utils.quantization_config import (
@@ -48,12 +48,6 @@ from transformers.utils.quantization_config import (
 )
 from transformers.utils.hub import get_checkpoint_shard_files
 from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPast,
-    CausalLMOutputWithPast,
-)
-from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_utils import (
     expand_device_map,
     is_fsdp_enabled,
@@ -114,66 +108,77 @@ from accelerate.utils import (
     get_max_memory,
     check_tied_parameters_on_same_device,
 )
-from .configuration_deepseek import DeepseekV3Config
-from .transformer_layers import DeepseekV3DecoderLayer, DeepseekV3RMSNorm, logger
+from transformers.cache_utils import (
+    Cache,
+    DynamicCache,
+    SlidingWindowCache,
+    StaticCache,
+)
+from transformers.generation import GenerationMixin
+from transformers.modeling_attn_mask_utils import AttentionMaskConverter
+from transformers.modeling_outputs import (
+    MoeCausalLMOutputWithPast,
+    MoeModelOutputWithPast,
+)
+from transformers.utils.deprecation import deprecate_kwarg
+from util import get_nproc_per_rank
+from .transformer_layers import (
+    logger,
+    Qwen2MoeDecoderLayer,
+    Qwen2MoeRMSNorm,
+    Qwen2MoeRotaryEmbedding,
+)
 from .transformer_layers_tp import (
     ColumnParallelLinear,
     ParallelEmbedding,
-    DeepseekV3DecoderLayerTP,
+    Qwen2MoeDecoderLayerTP,
 )
-from .transformer_layers_ep import DeepseekV3DecoderLayerEP
-from util import get_nproc_per_rank
+from .transformer_layers_ep import Qwen2MoeDecoderLayerEP
+from .configuration_qwen2_moe import Qwen2MoeConfig
 
-_CONFIG_FOR_DOC = "DeepseekV3Config"
+
+_CHECKPOINT_FOR_DOC = "Qwen/Qwen2-57B-A14B"
+_CONFIG_FOR_DOC = "Qwen2MoeConfig"
 
 
 def load_state_dict(
     checkpoint_file: Union[str, os.PathLike],
-    config: DeepseekV3Config,
+    config: Qwen2MoeConfig,
     is_quantized: bool = False,
     map_location: Optional[Union[str, torch.device]] = None,
     weights_only: bool = True,
 ):
-    if not os.path.exists(checkpoint_file):
-        return {}
-
     """
     Reads a PyTorch checkpoint file, returning properly formatted errors if they arise.
     """
     layer_start_idx = config.layer_start_idx
     layer_end_idx = config.layer_end_idx
     num_hidden_layers = config.num_hidden_layers
-    q_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
-    v_head_dim = config.v_head_dim
-    qk_rope_head_dim = config.qk_rope_head_dim
+
     vocab_start_idx = getattr(config, "vocab_start_idx", None)
     vocab_end_idx = getattr(config, "vocab_end_idx", None)
-    dim_start_idx = getattr(config, "dim_start_idx", None)
-    dim_end_idx = getattr(config, "dim_end_idx", None)
-    shared_moe_dim_start_idx = getattr(config, "shared_moe_dim_start_idx", None)
-    shared_moe_dim_end_idx = getattr(config, "shared_moe_dim_end_idx", None)
     moe_dim_start_idx = getattr(config, "moe_dim_start_idx", None)
     moe_dim_end_idx = getattr(config, "moe_dim_end_idx", None)
+    kv_heads_start_idx = getattr(config, "kv_heads_start_idx", None)
+    kv_heads_end_idx = getattr(config, "kv_heads_end_idx", None)
     heads_start_idx = getattr(config, "heads_start_idx", None)
     heads_end_idx = getattr(config, "heads_end_idx", None)
-    n_routed_experts = getattr(config, "n_routed_experts")
-    first_k_dense_replace = getattr(config, "first_k_dense_replace")
-    moe_layer_freq = getattr(config, "moe_layer_freq")
+    head_dim = getattr(config, "head_dim", None)
     expert_start_idx = getattr(config, "expert_start_idx", None)
     expert_end_idx = getattr(config, "expert_end_idx", None)
+    shared_expert_dim_start_idx = getattr(config, "shared_expert_dim_start_idx", None)
+    shared_expert_dim_end_idx = getattr(config, "shared_expert_dim_end_idx", None)
 
     if checkpoint_file.endswith(".safetensors") and is_safetensors_available():
         # Check format of the archive
         state_dict = {}
         with safe_open(checkpoint_file, framework="pt") as f:
-            # metadata = f.metadata()
-            # print(metadata.get("format"))
-            # if metadata.get("format") not in ["pt", "tf", "flax", "mlx"]:
-            #     raise OSError(
-            #         f"The safetensors archive passed at {checkpoint_file} does not contain the valid metadata. Make sure "
-            #         "you save your model with the `save_pretrained` method."
-            #     )
-
+            metadata = f.metadata()
+            if metadata.get("format") not in ["pt", "tf", "flax", "mlx"]:
+                raise OSError(
+                    f"The safetensors archive passed at {checkpoint_file} does not contain the valid metadata. Make sure "
+                    "you save your model with the `save_pretrained` method."
+                )
             for param_name in f.keys():
                 if param_name.startswith("model.layers"):
                     layer_id = int(param_name.split(".")[2])
@@ -200,61 +205,45 @@ def load_state_dict(
 
                 param = f.get_tensor(param_name)
                 key = param_name.split(".")[-2]
-
                 if key == "embed_tokens" and vocab_start_idx != None:
                     param = param[vocab_start_idx:vocab_end_idx]
                 elif key == "q_proj" and heads_start_idx != None:
+                    param = param[head_dim * heads_start_idx : head_dim * heads_end_idx]
+                elif (
+                    key == "k_proj" or key == "v_proj"
+                ) and kv_heads_start_idx != None:
                     param = param[
-                        q_head_dim * heads_start_idx : q_head_dim * heads_end_idx
-                    ]
-                elif key == "q_b_proj" and heads_start_idx != None:
-                    param = param[
-                        q_head_dim * heads_start_idx : q_head_dim * heads_end_idx
-                    ]
-                elif key == "kv_b_proj" and heads_start_idx != None:
-                    param = param[
-                        (q_head_dim - qk_rope_head_dim + v_head_dim)
-                        * heads_start_idx : (q_head_dim - qk_rope_head_dim + v_head_dim)
-                        * heads_end_idx
+                        head_dim * kv_heads_start_idx : head_dim * kv_heads_end_idx
                     ]
                 elif key == "o_proj" and heads_start_idx != None:
                     param = param[
-                        :, v_head_dim * heads_start_idx : v_head_dim * heads_end_idx
+                        :, head_dim * heads_start_idx : head_dim * heads_end_idx
                     ]
-                elif (key == "gate_proj" or key == "up_proj") and dim_start_idx != None:
-                    layer_idx = int(param_name.split(".")[2])
-                    if (
-                        n_routed_experts is not None
-                        and layer_idx >= first_k_dense_replace
-                        and layer_idx % moe_layer_freq == 0
-                    ):
-                        if param_name.split(".")[-3] == "shared_experts":
-                            param = param[
-                                shared_moe_dim_start_idx:shared_moe_dim_end_idx
-                            ]
-                        else:
+                elif key == "gate_proj" or key == "up_proj":
+                    expert_t = param_name.split(".")[-4]
+                    if expert_t == "experts":
+                        if moe_dim_start_idx != None:
                             param = param[moe_dim_start_idx:moe_dim_end_idx]
                     else:
-                        param = param[dim_start_idx:dim_end_idx]
-                elif key == "down_proj" and dim_start_idx != None:
-                    layer_idx = int(param_name.split(".")[2])
-                    if (
-                        n_routed_experts is not None
-                        and layer_idx >= first_k_dense_replace
-                        and layer_idx % moe_layer_freq == 0
-                    ):
-                        if param_name.split(".")[-3] == "shared_experts":
+                        if shared_expert_dim_start_idx != None:
                             param = param[
-                                :, shared_moe_dim_start_idx:shared_moe_dim_end_idx
+                                shared_expert_dim_start_idx:shared_expert_dim_end_idx
                             ]
-                        else:
+                elif key == "down_proj":
+                    expert_t = param_name.split(".")[-4]
+                    if expert_t == "experts":
+                        if moe_dim_start_idx != None:
                             param = param[:, moe_dim_start_idx:moe_dim_end_idx]
                     else:
-                        param = param[:, dim_start_idx:dim_end_idx]
+                        if shared_expert_dim_start_idx != None:
+                            param = param[
+                                :, shared_expert_dim_start_idx:shared_expert_dim_end_idx
+                            ]
                 elif key == "lm_head" and vocab_start_idx != None:
                     param = param[vocab_start_idx:vocab_end_idx]
 
                 state_dict[param_name] = param
+
         return state_dict
 
     try:
@@ -312,7 +301,96 @@ def load_state_dict(
             )
 
 
-DeepseekV3_START_DOCSTRING = r"""
+# Copied from transformers.models.mixtral.modeling_mixtral.load_balancing_loss_func
+def load_balancing_loss_func(
+    gate_logits: Union[torch.Tensor, Tuple[torch.Tensor], None],
+    num_experts: Optional[int] = None,
+    top_k=2,
+    attention_mask: Optional[torch.Tensor] = None,
+) -> Union[torch.Tensor, int]:
+    r"""
+    Computes auxiliary load balancing loss as in Switch Transformer - implemented in Pytorch.
+
+    See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details. This function implements the loss
+    function presented in equations (4) - (6) of the paper. It aims at penalizing cases where the routing between
+    experts is too unbalanced.
+
+    Args:
+        gate_logits:
+            Logits from the `gate`, should be a tuple of model.config.num_hidden_layers tensors of
+            shape [batch_size X sequence_length, num_experts].
+        num_experts:
+            Number of experts
+        top_k:
+            The number of experts to route per-token, can be also interpreted as the `top-k` routing
+            parameter.
+        attention_mask (`torch.Tensor`, *optional*):
+            The attention_mask used in forward function
+            shape [batch_size X sequence_length] if not None.
+
+    Returns:
+        The auxiliary loss.
+    """
+    if gate_logits is None or not isinstance(gate_logits, tuple):
+        return 0
+
+    if isinstance(gate_logits, tuple):
+        compute_device = gate_logits[0].device
+        concatenated_gate_logits = torch.cat(
+            [layer_gate.to(compute_device) for layer_gate in gate_logits], dim=0
+        )
+
+    routing_weights = torch.nn.functional.softmax(concatenated_gate_logits, dim=-1)
+
+    _, selected_experts = torch.topk(routing_weights, top_k, dim=-1)
+
+    expert_mask = torch.nn.functional.one_hot(selected_experts, num_experts)
+
+    if attention_mask is None:
+        # Compute the percentage of tokens routed to each experts
+        tokens_per_expert = torch.mean(expert_mask.float(), dim=0)
+
+        # Compute the average probability of routing to these experts
+        router_prob_per_expert = torch.mean(routing_weights, dim=0)
+    else:
+        batch_size, sequence_length = attention_mask.shape
+        num_hidden_layers = concatenated_gate_logits.shape[0] // (
+            batch_size * sequence_length
+        )
+
+        # Compute the mask that masks all padding tokens as 0 with the same shape of expert_mask
+        expert_attention_mask = (
+            attention_mask[None, :, :, None, None]
+            .expand(
+                (num_hidden_layers, batch_size, sequence_length, top_k, num_experts)
+            )
+            .reshape(-1, top_k, num_experts)
+            .to(compute_device)
+        )
+
+        # Compute the percentage of tokens routed to each experts
+        tokens_per_expert = torch.sum(
+            expert_mask.float() * expert_attention_mask, dim=0
+        ) / torch.sum(expert_attention_mask, dim=0)
+
+        # Compute the mask that masks all padding tokens as 0 with the same shape of tokens_per_expert
+        router_per_expert_attention_mask = (
+            attention_mask[None, :, :, None]
+            .expand((num_hidden_layers, batch_size, sequence_length, num_experts))
+            .reshape(-1, num_experts)
+            .to(compute_device)
+        )
+
+        # Compute the average probability of routing to these experts
+        router_prob_per_expert = torch.sum(
+            routing_weights * router_per_expert_attention_mask, dim=0
+        ) / torch.sum(router_per_expert_attention_mask, dim=0)
+
+    overall_loss = torch.sum(tokens_per_expert * router_prob_per_expert.unsqueeze(0))
+    return overall_loss * num_experts
+
+
+QWEN2MOE_START_DOCSTRING = r"""
     This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
     library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
     etc.)
@@ -322,7 +400,7 @@ DeepseekV3_START_DOCSTRING = r"""
     and behavior.
 
     Parameters:
-        config ([`DeepseekV3Config`]):
+        config ([`Qwen2MoeConfig`]):
             Model configuration class with all the parameters of the model. Initializing with a config file does not
             load the weights associated with the model, only the configuration. Check out the
             [`~PreTrainedModel.from_pretrained`] method to load the model weights.
@@ -330,16 +408,17 @@ DeepseekV3_START_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare DeepseekV3 Model outputting raw hidden-states without any specific head on top.",
-    DeepseekV3_START_DOCSTRING,
+    "The bare Qwen2MoE Model outputting raw hidden-states without any specific head on top.",
+    QWEN2MOE_START_DOCSTRING,
 )
-class DeepseekV3PreTrainedModel(PreTrainedModel):
-    config_class = DeepseekV3Config
+class Qwen2MoePreTrainedModel(PreTrainedModel):
+    config_class = Qwen2MoeConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["DeepseekV3DecoderLayer"]
+    _no_split_modules = ["Qwen2MoeDecoderLayer"]
     _skip_keys_device_placement = "past_key_values"
     _supports_flash_attn_2 = True
+    _supports_sdpa = True
     _supports_cache_class = True
 
     def _init_weights(self, module):
@@ -354,7 +433,7 @@ class DeepseekV3PreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
-DeepseekV3_INPUTS_DOCSTRING = r"""
+QWEN2MOE_INPUTS_DOCSTRING = r"""
     Args:
         input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
             Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
@@ -375,7 +454,7 @@ DeepseekV3_INPUTS_DOCSTRING = r"""
             Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
             [`PreTrainedTokenizer.__call__`] for details.
 
-            If `past_key_values` is used, optionally only the last `input_ids` have to be input (see
+            If `past_key_values` is used, optionally only the last `decoder_input_ids` have to be input (see
             `past_key_values`).
 
             If you want to change padding behavior, you should read [`modeling_opt._prepare_decoder_attention_mask`]
@@ -395,7 +474,8 @@ DeepseekV3_INPUTS_DOCSTRING = r"""
             returned by the model at a previous stage of decoding, when `use_cache=True` or `config.use_cache=True`.
 
             Two formats are allowed:
-            - a [`~cache_utils.Cache`] instance;
+            - a [`~cache_utils.Cache`] instance, see our
+            [kv cache guide](https://huggingface.co/docs/transformers/en/kv_cache);
             - Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of
             shape `(batch_size, num_heads, sequence_length, embed_size_per_head)`). This is also known as the legacy
             cache format.
@@ -419,26 +499,33 @@ DeepseekV3_INPUTS_DOCSTRING = r"""
         output_hidden_states (`bool`, *optional*):
             Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
             more detail.
+        output_router_logits (`bool`, *optional*):
+            Whether or not to return the logits of all the routers. They are useful for computing the router loss, and
+            should not be returned during inference.
         return_dict (`bool`, *optional*):
             Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+        cache_position (`torch.LongTensor` of shape `(sequence_length)`, *optional*):
+            Indices depicting the position of the input sequence tokens in the sequence. Contrarily to `position_ids`,
+            this tensor is not affected by padding. It is used to update the cache in the correct position and to infer
+            the complete sequence length.
 """
 
 
 @add_start_docstrings(
-    "The bare DeepseekV3 Model outputting raw hidden-states without any specific head on top.",
-    DeepseekV3_START_DOCSTRING,
+    "The bare Qwen2MoE Model outputting raw hidden-states without any specific head on top.",
+    QWEN2MOE_START_DOCSTRING,
 )
-class DeepseekV3Model(DeepseekV3PreTrainedModel):
+class Qwen2MoeModel(Qwen2MoePreTrainedModel):
     """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`DeepseekV3DecoderLayer`]
+    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Qwen2MoeDecoderLayer`]
 
     Args:
-        config: DeepseekV3Config
+        config: Qwen2MoeConfig
     """
 
     def __init__(
         self,
-        config: DeepseekV3Config,
+        config: Qwen2MoeConfig,
         pipeline_rank: int = 0,
         num_pipeline_ranks: int = 1,
         tp_rank: int = 0,
@@ -447,10 +534,9 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
         num_ep_ranks: Optional[int] = None,
     ):
         super().__init__(config)
-
-        self.hidden_size = config.hidden_size
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
+        self.hidden_size = config.hidden_size
         self.pipeline_rank = pipeline_rank
         self.num_pipeline_ranks = num_pipeline_ranks
         self.tp_rank = tp_rank
@@ -476,18 +562,19 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
 
         if self.num_tp_ranks == 1:
             layers = [
-                DeepseekV3DecoderLayer(config, layer_idx)
+                Qwen2MoeDecoderLayer(config, layer_idx)
                 for layer_idx in range(config.num_hidden_layers)
             ]
         else:
+            pass
             if num_ep_ranks != None:
                 layers = [
-                    DeepseekV3DecoderLayerEP(config, layer_idx, self.tp_group)
+                    Qwen2MoeDecoderLayerEP(config, layer_idx, self.tp_group)
                     for layer_idx in range(config.num_hidden_layers)
                 ]
             else:
                 layers = [
-                    DeepseekV3DecoderLayerTP(config, layer_idx, self.tp_group)
+                    Qwen2MoeDecoderLayerTP(config, layer_idx, self.tp_group)
                     for layer_idx in range(config.num_hidden_layers)
                 ]
 
@@ -497,13 +584,14 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
                 for i in range(config.layer_start_idx, config.layer_end_idx)
             }
         )
-
-        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
+        self._attn_implementation = config._attn_implementation
 
         if pipeline_rank == self.num_pipeline_ranks - 1:
-            self.norm = DeepseekV3RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
+            self.norm = Qwen2MoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
-            self.norm: Optional[DeepseekV3RMSNorm] = None
+            self.norm: Optional[Qwen2MoeRMSNorm] = None
+
+        self.rotary_emb = Qwen2MoeRotaryEmbedding(config=config)
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -515,7 +603,7 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    @add_start_docstrings_to_model_forward(DeepseekV3_INPUTS_DOCSTRING)
+    @add_start_docstrings_to_model_forward(QWEN2MOE_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -526,12 +614,19 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> Union[Tuple, MoeModelOutputWithPast]:
         output_attentions = (
             output_attentions
             if output_attentions is not None
             else self.config.output_attentions
+        )
+        output_router_logits = (
+            output_router_logits
+            if output_router_logits is not None
+            else self.config.output_router_logits
         )
         output_hidden_states = (
             output_hidden_states
@@ -544,34 +639,31 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
             return_dict if return_dict is not None else self.config.use_return_dict
         )
 
-        # retrieve input_ids and inputs_embeds
-        if input_ids is not None and inputs_embeds is not None:
+        if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
-                "You cannot specify both input_ids and inputs_embeds at the same time"
+                "You must specify exactly one of input_ids or inputs_embeds"
             )
-        elif input_ids is not None:
-            batch_size, seq_length = input_ids.shape[:2]
-        elif inputs_embeds is not None:
-            batch_size, seq_length = inputs_embeds.shape[:2]
-        else:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
 
-        past_key_values_length = 0
-        if use_cache:
-            use_legacy_cache = not isinstance(past_key_values, Cache)
-            if use_legacy_cache:
+        if self.gradient_checkpointing and self.training:
+            if use_cache:
+                logger.warning_once(
+                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+                )
+                use_cache = False
+
+        # kept for BC (non `Cache` `past_key_values` inputs)
+        return_legacy_cache = False
+        if use_cache and not isinstance(past_key_values, Cache):
+            return_legacy_cache = True
+            if past_key_values is None:
+                past_key_values = DynamicCache()
+            else:
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            past_key_values_length = past_key_values.get_usable_length(seq_length)
-
-        if position_ids is None:
-            device = input_ids.device if input_ids is not None else inputs_embeds.device
-            position_ids = torch.arange(
-                past_key_values_length,
-                seq_length + past_key_values_length,
-                dtype=torch.long,
-                device=device,
-            )
-            position_ids = position_ids.unsqueeze(0)
+                logger.warning_once(
+                    "We detected that you are passing `past_key_values` as a tuple of tuples. This is deprecated and "
+                    "will be removed in v4.47. Please convert your cache or use an appropriate `Cache` class "
+                    "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
+                )
 
         if inputs_embeds is None and self.pipeline_rank == 0:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -594,42 +686,66 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
                     group=self.tp_group,
                 )
 
-        if self._use_flash_attention_2:
-            # 2d mask is passed through the layers
-            attention_mask = (
-                attention_mask
-                if (attention_mask is not None and 0 in attention_mask)
-                else None
+        if cache_position is None:
+            past_seen_tokens = (
+                past_key_values.get_seq_length() if past_key_values is not None else 0
             )
-        else:
-            # 4d mask is passed through the layers
-            attention_mask = _prepare_4d_causal_attention_mask(
-                attention_mask,
-                (batch_size, seq_length),
-                inputs_embeds,
-                past_key_values_length,
+            cache_position = torch.arange(
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
             )
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
 
-        # embed positions
+        causal_mask = self._update_causal_mask(
+            attention_mask,
+            inputs_embeds,
+            cache_position,
+            past_key_values,
+            output_attentions,
+        )
+
         hidden_states = inputs_embeds
+
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
+        all_router_logits = () if output_router_logits else None
         next_decoder_cache = None
 
         for decoder_layer in self.layers.values():
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            layer_outputs = decoder_layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_values,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-            )
+            if self.gradient_checkpointing and self.training:
+                layer_outputs = self._gradient_checkpointing_func(
+                    decoder_layer.__call__,
+                    hidden_states,
+                    causal_mask,
+                    position_ids,
+                    past_key_values,
+                    output_attentions,
+                    output_router_logits,
+                    use_cache,
+                    cache_position,
+                    position_embeddings,
+                )
+            else:
+                layer_outputs = decoder_layer(
+                    hidden_states,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_values,
+                    output_attentions=output_attentions,
+                    output_router_logits=output_router_logits,
+                    use_cache=use_cache,
+                    cache_position=cache_position,
+                    position_embeddings=position_embeddings,
+                )
 
             hidden_states = layer_outputs[0]
 
@@ -638,6 +754,9 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+
+            if output_router_logits and layer_outputs[-1] is not None:
+                all_router_logits += (layer_outputs[-1],)
 
         if self.pipeline_rank < self.num_pipeline_ranks - 1:
             if self.tp_rank == self.num_tp_ranks - 1:
@@ -652,29 +771,205 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        next_cache = None
-        if use_cache:
-            next_cache = (
-                next_decoder_cache.to_legacy_cache()
-                if use_legacy_cache
-                else next_decoder_cache
-            )
+        next_cache = next_decoder_cache if use_cache else None
+        if return_legacy_cache:
+            next_cache = next_cache.to_legacy_cache()
+
         if not return_dict:
             return tuple(
                 v
-                for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
+                for v in [
+                    hidden_states,
+                    next_cache,
+                    all_hidden_states,
+                    all_self_attns,
+                    all_router_logits,
+                ]
                 if v is not None
             )
-        return BaseModelOutputWithPast(
+        return MoeModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
+            router_logits=all_router_logits,
         )
 
+    # Copied from transformers.models.phi3.modeling_phi3.Phi3Model._update_causal_mask with Phi3->Qwen2Moe
+    def _update_causal_mask(
+        self,
+        attention_mask: torch.Tensor,
+        input_tensor: torch.Tensor,
+        cache_position: torch.Tensor,
+        past_key_values: Cache,
+        output_attentions: bool,
+    ):
+        if self.config._attn_implementation == "flash_attention_2":
+            if attention_mask is not None and past_key_values is not None:
+                is_padding_right = (
+                    attention_mask[:, -1].sum().item() != input_tensor.size()[0]
+                )
+                if is_padding_right:
+                    raise ValueError(
+                        "You are attempting to perform batched generation with padding_side='right'"
+                        " this may lead to unexpected behaviour for Flash Attention version of Qwen2Moe. Make sure to "
+                        " call `tokenizer.padding_side  = 'left'` before tokenizing the input. "
+                    )
+            if attention_mask is not None and 0.0 in attention_mask:
+                return attention_mask
+            return None
 
-class Transformer(DeepseekV3PreTrainedModel):
+        # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
+        # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
+        # to infer the attention mask.
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
+        using_static_cache = isinstance(past_key_values, StaticCache)
+        using_sliding_window_cache = isinstance(past_key_values, SlidingWindowCache)
+
+        # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
+        if (
+            self.config._attn_implementation == "sdpa"
+            and not (using_static_cache or using_sliding_window_cache)
+            and not output_attentions
+        ):
+            if AttentionMaskConverter._ignore_causal_mask_sdpa(
+                attention_mask,
+                inputs_embeds=input_tensor,
+                past_key_values_length=past_seen_tokens,
+                sliding_window=self.config.sliding_window,
+                is_training=self.training,
+            ):
+                return None
+
+        dtype, device = input_tensor.dtype, input_tensor.device
+        min_dtype = torch.finfo(dtype).min
+        sequence_length = input_tensor.shape[1]
+        # SlidingWindowCache or StaticCache
+        if using_sliding_window_cache or using_static_cache:
+            target_length = past_key_values.get_max_cache_shape()
+        # DynamicCache or no cache
+        else:
+            target_length = (
+                attention_mask.shape[-1]
+                if isinstance(attention_mask, torch.Tensor)
+                else past_seen_tokens + sequence_length + 1
+            )
+
+        # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
+        causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
+            attention_mask,
+            sequence_length=sequence_length,
+            target_length=target_length,
+            dtype=dtype,
+            device=device,
+            cache_position=cache_position,
+            batch_size=input_tensor.shape[0],
+            config=self.config,
+            past_key_values=past_key_values,
+        )
+
+        if (
+            self.config._attn_implementation == "sdpa"
+            and attention_mask is not None
+            and attention_mask.device.type in ["cuda", "xpu"]
+            and not output_attentions
+        ):
+            # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when
+            # using left padding. This is required by F.scaled_dot_product_attention memory-efficient attention path.
+            # Details: https://github.com/pytorch/pytorch/issues/110213
+            causal_mask = AttentionMaskConverter._unmask_unattended(
+                causal_mask, min_dtype
+            )
+
+        return causal_mask
+
+    @staticmethod
+    # Copied from transformers.models.mistral.modeling_mistral.MistralModel._prepare_4d_causal_attention_mask_with_cache_position with Mistral->Qwen2Moe
+    def _prepare_4d_causal_attention_mask_with_cache_position(
+        attention_mask: torch.Tensor,
+        sequence_length: int,
+        target_length: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        cache_position: torch.Tensor,
+        batch_size: int,
+        config: Qwen2MoeConfig,
+        past_key_values: Cache,
+    ):
+        """
+        Creates a causal 4D mask of shape `(batch_size, 1, query_length, key_value_length)` from a 2D mask of shape
+        `(batch_size, key_value_length)`, or if the input `attention_mask` is already 4D, do nothing.
+
+        Args:
+            attention_mask (`torch.Tensor`):
+                A 2D attention mask of shape `(batch_size, key_value_length)` or a 4D attention mask of shape `(batch_size, 1, query_length, key_value_length)`.
+            sequence_length (`int`):
+                The sequence length being processed.
+            target_length (`int`):
+                The target length: when generating with static cache, the mask should be as long as the static cache, to account for the 0 padding, the part of the cache that is not filled yet.
+            dtype (`torch.dtype`):
+                The dtype to use for the 4D attention mask.
+            device (`torch.device`):
+                The device to plcae the 4D attention mask on.
+            cache_position (`torch.Tensor`):
+                Indices depicting the position of the input sequence tokens in the sequence.
+            batch_size (`torch.Tensor`):
+                Batch size.
+            config (`Qwen2MoeConfig`):
+                The model's configuration class
+            past_key_values (`Cache`):
+                The cache class that is being used currently to generate
+        """
+        if attention_mask is not None and attention_mask.dim() == 4:
+            # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
+            causal_mask = attention_mask
+        else:
+            min_dtype = torch.finfo(dtype).min
+            causal_mask = torch.full(
+                (sequence_length, target_length),
+                fill_value=min_dtype,
+                dtype=dtype,
+                device=device,
+            )
+            diagonal_attend_mask = torch.arange(
+                target_length, device=device
+            ) > cache_position.reshape(-1, 1)
+            if config.sliding_window is not None:
+                # if we have sliding window, we should not attend to tokens beyond sliding window length, so we mask them out also
+                # the check is needed to verify is current checkpoint was trained with sliding window or not
+                if (
+                    not isinstance(past_key_values, SlidingWindowCache)
+                    or sequence_length > target_length
+                ):
+                    sliding_attend_mask = torch.arange(
+                        target_length, device=device
+                    ) <= (cache_position.reshape(-1, 1) - config.sliding_window)
+                    diagonal_attend_mask.bitwise_or_(sliding_attend_mask)
+            causal_mask *= diagonal_attend_mask
+            causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
+            if attention_mask is not None:
+                causal_mask = (
+                    causal_mask.clone()
+                )  # copy to contiguous memory for in-place edit
+                if attention_mask.shape[-1] > target_length:
+                    attention_mask = attention_mask[:, :target_length]
+                mask_length = attention_mask.shape[-1]
+                padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[
+                    :, None, None, :
+                ].to(causal_mask.device)
+                padding_mask = padding_mask == 0
+                causal_mask[:, :, :, :mask_length] = causal_mask[
+                    :, :, :, :mask_length
+                ].masked_fill(padding_mask, min_dtype)
+        return causal_mask
+
+
+class Transformer(Qwen2MoePreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
+    _tp_plan = {"lm_head": "colwise_rep"}
+    _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
     def __init__(
         self,
@@ -690,7 +985,6 @@ class Transformer(DeepseekV3PreTrainedModel):
     ):
         super().__init__(config)
         self.vocab_size = config.vocab_size
-
         self.pipeline_rank = pipeline_rank
         self.num_pipeline_ranks = num_pipeline_ranks
         assert self.pipeline_rank < self.num_pipeline_ranks
@@ -705,7 +999,7 @@ class Transformer(DeepseekV3PreTrainedModel):
             assert self.num_ep_ranks > 1
             assert self.ep_rank < self.num_ep_ranks
             assert self.num_tp_ranks > 1
-            assert self.num_ep_ranks <= config.n_routed_experts
+            assert self.num_ep_ranks <= config.num_experts
 
         if (
             self.num_pipeline_ranks == 1
@@ -750,6 +1044,7 @@ class Transformer(DeepseekV3PreTrainedModel):
         # exit()
 
         if self.num_tp_ranks > 1:
+
             # Split Vocabulary Size
             remainder = config.vocab_size % self.num_tp_ranks
             tp_vocab_size = config.vocab_size // self.num_tp_ranks
@@ -774,35 +1069,31 @@ class Transformer(DeepseekV3PreTrainedModel):
             config.dim_start_idx = dim_start_idx
             config.dim_end_idx = dim_end_idx
 
-            # For the shared Expert in MoE Layer
-            if config.n_shared_experts is not None:
-                shared_moe_intermediate_size = (
-                    config.moe_intermediate_size * config.n_shared_experts
+            shared_expert_intermediate_size = config.shared_expert_intermediate_size
+            remainder = shared_expert_intermediate_size % self.num_tp_ranks
+            tp_shared_expert_intermediate_size = (
+                shared_expert_intermediate_size // self.num_tp_ranks
+            )
+            shared_expert_dim_start_idx = (
+                self.tp_rank * tp_shared_expert_intermediate_size
+            )
+            if self.num_tp_ranks - self.tp_rank <= remainder:
+                tp_shared_expert_intermediate_size += 1
+                shared_expert_dim_start_idx += remainder - (
+                    self.num_tp_ranks - self.tp_rank
                 )
-                remainder = shared_moe_intermediate_size % self.num_tp_ranks
-                tp_shared_moe_intermediate_size = (
-                    shared_moe_intermediate_size // self.num_tp_ranks
-                )
-                shared_moe_dim_start_idx = (
-                    self.tp_rank * tp_shared_moe_intermediate_size
-                )
-                if self.num_tp_ranks - self.tp_rank <= remainder:
-                    tp_shared_moe_intermediate_size += 1
-                    shared_moe_dim_start_idx += remainder - (
-                        self.num_tp_ranks - self.tp_rank
-                    )
-                shared_moe_dim_end_idx = (
-                    shared_moe_dim_start_idx + tp_shared_moe_intermediate_size
-                )
-                config.shared_moe_intermediate_size = tp_shared_moe_intermediate_size
-                config.shared_moe_dim_start_idx = shared_moe_dim_start_idx
-                config.shared_moe_dim_end_idx = shared_moe_dim_end_idx
+            shared_expert_dim_end_idx = (
+                shared_expert_dim_start_idx + tp_shared_expert_intermediate_size
+            )
+            config.shared_expert_intermediate_size = tp_shared_expert_intermediate_size
+            config.shared_expert_dim_start_idx = shared_expert_dim_start_idx
+            config.shared_expert_dim_end_idx = shared_expert_dim_end_idx
 
             # For MoE Layer
             if self.num_ep_ranks:
                 if self.num_ep_ranks == self.num_tp_ranks:  # Pure EP
-                    remainder = config.n_routed_experts % self.num_ep_ranks
-                    n_expert = config.n_routed_experts // self.num_ep_ranks
+                    remainder = config.num_experts % self.num_ep_ranks
+                    n_expert = config.num_experts // self.num_ep_ranks
                     expert_start_idx = self.ep_rank * n_expert
                     if self.num_ep_ranks - self.ep_rank <= remainder:
                         n_expert += 1
@@ -815,10 +1106,10 @@ class Transformer(DeepseekV3PreTrainedModel):
                     assert self.num_ep_ranks == len(n_process_per_rank)
                     n_process = sum(n_process_per_rank)
                     n_expert_per_rank = [
-                        max(1, round(n / n_process * config.n_routed_experts))
+                        max(1, round(n / n_process * config.num_experts))
                         for n in n_process_per_rank
                     ]
-                    for i in range(config.n_routed_experts - sum(n_expert_per_rank)):
+                    for i in range(config.num_experts - sum(n_expert_per_rank)):
                         n_expert_per_rank[-i - 1] += 1
                     n_expert = n_expert_per_rank[self.ep_rank]
                     expert_start_idx = sum(n_expert_per_rank[: self.ep_rank])
@@ -872,6 +1163,7 @@ class Transformer(DeepseekV3PreTrainedModel):
                 config.moe_dim_end_idx = moe_dim_end_idx
 
             # For Attn Layer
+            config.head_dim = config.hidden_size // config.num_attention_heads
             n_heads_per_group = config.num_attention_heads // config.num_key_value_heads
             remainder = config.num_key_value_heads % self.num_tp_ranks
             n_kv_heads = config.num_key_value_heads // self.num_tp_ranks
@@ -898,14 +1190,15 @@ class Transformer(DeepseekV3PreTrainedModel):
             #     if i == dist.get_rank():
             #         print(i, tp_vocab_start_idx, tp_vocal_end_idx)
             #         print(i, dim_start_idx, dim_end_idx)
-            #         print(i, shared_moe_dim_start_idx, shared_moe_dim_end_idx)
             #         print(i, moe_dim_start_idx, moe_dim_end_idx)
+            #         print(i, shared_expert_dim_start_idx, shared_expert_dim_end_idx)
             #         print(i, heads_start_idx, heads_end_idx)
+            #         print(i, kv_heads_start_idx, kv_heads_end_idx)
             #     dist.barrier()
             # dist.destroy_process_group()
             # exit()
 
-        self.model = DeepseekV3Model(
+        self.model = Qwen2MoeModel(
             config,
             pipeline_rank=pipeline_rank,
             num_pipeline_ranks=num_pipeline_ranks,
@@ -914,7 +1207,6 @@ class Transformer(DeepseekV3PreTrainedModel):
             tp_group=tp_group,
             num_ep_ranks=self.num_ep_ranks,
         )
-
         if self.pipeline_rank == self.num_pipeline_ranks - 1:
             if self.num_tp_ranks == 1:
                 self.lm_head = nn.Linear(
@@ -931,6 +1223,9 @@ class Transformer(DeepseekV3PreTrainedModel):
         else:
             self.lm_head: Optional[nn.Linear] = None
 
+        self.router_aux_loss_coef = config.router_aux_loss_coef
+        self.num_experts = config.num_experts
+        self.num_experts_per_tok = config.num_experts_per_tok
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -952,9 +1247,10 @@ class Transformer(DeepseekV3PreTrainedModel):
     def get_decoder(self):
         return self.model
 
-    @add_start_docstrings_to_model_forward(DeepseekV3_INPUTS_DOCSTRING)
+    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
+    @add_start_docstrings_to_model_forward(QWEN2MOE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
+        output_type=MoeCausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
     )
     def forward(
         self,
@@ -967,23 +1263,34 @@ class Transformer(DeepseekV3PreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        output_router_logits: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **loss_kwargs,
+    ) -> Union[Tuple, MoeCausalLMOutputWithPast]:
         r"""
         Args:
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, transformers.,
+                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
                 config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, transformers., config.vocab_size]`.
+                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+
+            logits_to_keep (`int` or `torch.Tensor`, *optional*):
+                If an `int`, compute logits for the last `logits_to_keep` tokens. If `0`, calculate logits for all
+                `input_ids` (special case). Only last token logits are needed for generation, and calculating them only for that
+                token can save memory, which becomes pretty significant for long sequences or large vocabulary size.
+                If a `torch.Tensor`, must be 1D corresponding to the indices to keep in the sequence length dimension.
+                This is useful when using packed tensor format (single dimension for batch and sequence length).
 
         Returns:
 
         Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, DeepseekV3ForCausalLM
+        >>> from transformers import AutoTokenizer, Qwen2MoeForCausalLM
 
-        >>> model = DeepseekV3ForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
+        >>> model = Qwen2MoeForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
         >>> tokenizer = AutoTokenizer.from_pretrained(PATH_TO_CONVERTED_TOKENIZER)
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
@@ -994,10 +1301,16 @@ class Transformer(DeepseekV3PreTrainedModel):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
+
         output_attentions = (
             output_attentions
             if output_attentions is not None
             else self.config.output_attentions
+        )
+        output_router_logits = (
+            output_router_logits
+            if output_router_logits is not None
+            else self.config.output_router_logits
         )
         output_hidden_states = (
             output_hidden_states
@@ -1018,10 +1331,18 @@ class Transformer(DeepseekV3PreTrainedModel):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+            output_router_logits=output_router_logits,
             return_dict=return_dict,
+            cache_position=cache_position,
         )
 
         hidden_states = outputs[0]
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        slice_indices = (
+            slice(-logits_to_keep, None)
+            if isinstance(logits_to_keep, int)
+            else logits_to_keep
+        )
 
         if self.pipeline_rank < self.num_pipeline_ranks - 1:
             logits = torch.empty(
@@ -1031,113 +1352,43 @@ class Transformer(DeepseekV3PreTrainedModel):
             )
         else:
             assert self.lm_head is not None
-            logits = self.lm_head(hidden_states)
+            logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         if self.num_pipeline_ranks > 1:
             dist.broadcast(logits, src=dist.get_world_size() - 1)
 
-        logits = logits.float()
-
         loss = None
         if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
+            loss = self.loss_function(logits, labels, self.vocab_size, **loss_kwargs)
+
+        aux_loss = None
+        if output_router_logits:
+            aux_loss = load_balancing_loss_func(
+                outputs.router_logits if return_dict else outputs[-1],
+                self.num_experts,
+                self.num_experts_per_tok,
+                attention_mask,
+            )
+            if labels is not None:
+                loss += self.router_aux_loss_coef * aux_loss.to(
+                    loss.device
+                )  # make sure to reside in the same device
 
         if not return_dict:
             output = (logits,) + outputs[1:]
+            if output_router_logits:
+                output = (aux_loss,) + output
             return (loss,) + output if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        return MoeCausalLMOutputWithPast(
             loss=loss,
+            aux_loss=aux_loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            router_logits=outputs.router_logits,
         )
-
-    def prepare_inputs_for_generation(
-        self,
-        input_ids,
-        past_key_values=None,
-        attention_mask=None,
-        inputs_embeds=None,
-        **kwargs,
-    ):
-        if past_key_values is not None:
-            if isinstance(past_key_values, Cache):
-                cache_length = past_key_values.get_seq_length()
-                past_length = past_key_values.seen_tokens
-                max_cache_length = past_key_values.get_max_length()
-            else:
-                cache_length = past_length = past_key_values[0][0].shape[2]
-                max_cache_length = None
-
-            # Keep only the unprocessed tokens:
-            # 1 - If the length of the attention_mask exceeds the length of input_ids, then we are in a setting where
-            # some of the inputs are exclusivelly passed as part of the cache (e.g. when passing input_embeds as
-            # input)
-            if (
-                attention_mask is not None
-                and attention_mask.shape[1] > input_ids.shape[1]
-            ):
-                input_ids = input_ids[:, -(attention_mask.shape[1] - past_length) :]
-            # 2 - If the past_length is smaller than input_ids', then input_ids holds all input tokens. We can discard
-            # input_ids based on the past_length.
-            elif past_length < input_ids.shape[1]:
-                input_ids = input_ids[:, past_length:]
-            # 3 - Otherwise (past_length >= input_ids.shape[1]), let's assume input_ids only has unprocessed tokens.
-
-            # If we are about to go beyond the maximum cache length, we need to crop the input attention mask.
-            if (
-                max_cache_length is not None
-                and attention_mask is not None
-                and cache_length + input_ids.shape[1] > max_cache_length
-            ):
-                attention_mask = attention_mask[:, -max_cache_length:]
-
-        position_ids = kwargs.get("position_ids", None)
-        if attention_mask is not None and position_ids is None:
-            # create position_ids on the fly for batch generation
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
-            if past_key_values:
-                position_ids = position_ids[:, -input_ids.shape[1] :]
-
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and past_key_values is None:
-            model_inputs = {"inputs_embeds": inputs_embeds}
-        else:
-            model_inputs = {"input_ids": input_ids}
-
-        model_inputs.update(
-            {
-                "position_ids": position_ids,
-                "past_key_values": past_key_values,
-                "use_cache": kwargs.get("use_cache"),
-                "attention_mask": attention_mask,
-            }
-        )
-        return model_inputs
-
-    @staticmethod
-    def _reorder_cache(past_key_values, beam_idx):
-        reordered_past = ()
-        for layer_past in past_key_values:
-            reordered_past += (
-                tuple(
-                    past_state.index_select(0, beam_idx.to(past_state.device))
-                    for past_state in layer_past
-                ),
-            )
-        return reordered_past
 
     @classmethod
     def from_pretrained(
