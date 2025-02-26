@@ -561,7 +561,9 @@ class DeepseekV3Model(DeepseekV3PreTrainedModel):
             use_legacy_cache = not isinstance(past_key_values, Cache)
             if use_legacy_cache:
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            past_key_values_length = past_key_values.get_usable_length(seq_length)
+            past_key_values_length = past_key_values.get_usable_length(
+                seq_length, layer_idx=self.config.layer_start_idx
+            )
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -1073,7 +1075,9 @@ class Transformer(DeepseekV3PreTrainedModel):
     ):
         if past_key_values is not None:
             if isinstance(past_key_values, Cache):
-                cache_length = past_key_values.get_seq_length()
+                cache_length = past_key_values.get_seq_length(
+                    layer_idx=self.config.layer_start_idx
+                )
                 past_length = past_key_values.seen_tokens
                 max_cache_length = past_key_values.get_max_length()
             else:

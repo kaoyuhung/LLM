@@ -1,7 +1,7 @@
 from typing import Optional, Dict, Union, List, Tuple, Any
 import torch
 
-from transformers.cache_utils import Cache, logger
+from transformers.cache_utils import Cache
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import is_torchdynamo_compiling
 

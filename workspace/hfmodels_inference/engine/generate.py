@@ -17,44 +17,70 @@ def generate(
     batch_size: int,
     temperature: float,
     top_p: float,
+    use_cache: bool = True,
     eos_id: Optional[int] = None,
 ) -> Tuple[List[List[int]], List[List[float]]]:
 
     B = len(prompts)
     inputs = tokenizer(prompts, padding=True, return_tensors="pt").to(model.device)
-    generated_tokens = []
-    is_finished = torch.tensor([False for _ in range(B)])
+    is_finished, generated_tokens = torch.tensor([False for _ in range(B)]), []
 
-    past_key_values = DynamicCache()
-    # past_key_values = StaticCache(
-    #     config=model.config,
-    #     max_batch_size=batch_size,
-    #     max_cache_len=inputs["input_ids"].shape[1] + max_new_tokens,
-    #     device=model.device,
-    #     dtype=model.dtype,
-    # )
-    for _ in range(max_new_tokens):
-        outputs = model(**inputs, past_key_values=past_key_values, use_cache=True)
-        # next_token_ids = outputs.logits[:, -1:].argmax(-1)
-        next_token_ids = sample(
-            outputs.logits[:, -1:], temperature=temperature, top_p=top_p
-        )
-        if eos_id is not None:
-            if isinstance(eos_id, list):
-                for id in eos_id:
-                    is_finished = is_finished | (next_token_ids == id).cpu()
-            else:
-                is_finished = is_finished | (next_token_ids == eos_id).cpu()
-        if is_finished.all():
-            break
-        next_token_ids = next_token_ids[:, None]
-        generated_tokens.append(next_token_ids.cpu())
-        attention_mask = inputs["attention_mask"]
-        attention_mask = torch.cat(
-            [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
-            dim=-1,
-        )
-        inputs = {"input_ids": next_token_ids, "attention_mask": attention_mask}
+    if use_cache:
+        past_key_values = DynamicCache()
+        # past_key_values = StaticCache(
+        #     config=model.config,
+        #     max_batch_size=batch_size,
+        #     max_cache_len=inputs["input_ids"].shape[1] + max_new_tokens,
+        #     device=model.device,
+        #     dtype=model.dtype,
+        # )
+        for _ in range(max_new_tokens):
+            outputs = model(**inputs, past_key_values=past_key_values, use_cache=True)
+            # next_token_ids = outputs.logits[:, -1:].argmax(-1)
+            next_token_ids = sample(
+                outputs.logits[:, -1:], temperature=temperature, top_p=top_p
+            )
+            if eos_id is not None:
+                if isinstance(eos_id, list):
+                    for id in eos_id:
+                        is_finished = is_finished | (next_token_ids == id).cpu()
+                else:
+                    is_finished = is_finished | (next_token_ids == eos_id).cpu()
+            if is_finished.all():
+                break
+            next_token_ids = next_token_ids[:, None]
+            generated_tokens.append(next_token_ids.cpu())
+            attention_mask = inputs["attention_mask"]
+            attention_mask = torch.cat(
+                [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
+                dim=-1,
+            )
+            inputs = {"input_ids": next_token_ids, "attention_mask": attention_mask}
+    else:
+        generated_ids = inputs.input_ids
+        for _ in range(max_new_tokens):
+            outputs = model(**inputs, use_cache=False)
+            # next_token_ids = outputs.logits[:, -1:].argmax(-1)
+            next_token_ids = sample(
+                outputs.logits[:, -1:], temperature=temperature, top_p=top_p
+            )
+            if eos_id is not None:
+                if isinstance(eos_id, list):
+                    for id in eos_id:
+                        is_finished = is_finished | (next_token_ids == id).cpu()
+                else:
+                    is_finished = is_finished | (next_token_ids == eos_id).cpu()
+            if is_finished.all():
+                break
+            next_token_ids = next_token_ids[:, None]
+            generated_tokens.append(next_token_ids.cpu())
+            attention_mask = inputs["attention_mask"]
+            attention_mask = torch.cat(
+                [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
+                dim=-1,
+            )
+            generated_ids = torch.cat([generated_ids, next_token_ids], dim=-1)
+            inputs = {"input_ids": generated_ids, "attention_mask": attention_mask}
 
     if generated_tokens:
         generated_tokens = torch.cat(generated_tokens, 1)
@@ -109,7 +135,7 @@ def measure_generate(
     else:
         generated_ids = inputs.input_ids
         for _ in range(max_new_tokens):
-            outputs = model(generated_ids)
+            outputs = model(**inputs, use_cache=False)
             if _ == 0:
                 dist.barrier()
                 t1 = time.time()
@@ -118,7 +144,13 @@ def measure_generate(
             )
             next_token_ids = next_token_ids[:, None]
             generated_tokens.append(next_token_ids.cpu())
+            attention_mask = inputs["attention_mask"]
+            attention_mask = torch.cat(
+                [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
+                dim=-1,
+            )
             generated_ids = torch.cat([generated_ids, next_token_ids], dim=-1)
+            inputs = {"input_ids": generated_ids, "attention_mask": attention_mask}
 
     dist.barrier()
     t2 = time.time()

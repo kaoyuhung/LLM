@@ -71,6 +71,7 @@ def run(
             batch_size=batch_size,
             temperature=T,
             top_p=P,
+            use_cache=use_cache,
             eos_id=model.generation_config.eos_token_id,
         )
         if LOCAL_RANK == 0:
@@ -91,6 +92,7 @@ def run(
                 batch_size=batch_size,
                 temperature=T,
                 top_p=P,
+                use_cache=use_cache,
                 eos_id=model.generation_config.eos_token_id,
             )
             if LOCAL_RANK == 0:

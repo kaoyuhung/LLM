@@ -663,7 +663,9 @@ class MixtralModel(MixtralPreTrainedModel):
 
         if cache_position is None:
             past_seen_tokens = (
-                past_key_values.get_seq_length() if past_key_values is not None else 0
+                past_key_values.get_seq_length(layer_idx=self.config.layer_start_idx)
+                if past_key_values is not None
+                else 0
             )
             cache_position = torch.arange(
                 past_seen_tokens,
@@ -784,7 +786,9 @@ class MixtralModel(MixtralPreTrainedModel):
         # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
         # to infer the attention mask.
         past_seen_tokens = (
-            past_key_values.get_seq_length() if past_key_values is not None else 0
+            past_key_values.get_seq_length(layer_idx=self.config.layer_start_idx)
+            if past_key_values is not None
+            else 0
         )
         using_static_cache = isinstance(past_key_values, StaticCache)
         using_sliding_window_cache = isinstance(past_key_values, SlidingWindowCache)
@@ -1262,7 +1266,7 @@ class Transformer(MixtralPreTrainedModel, GenerationMixin):
             cache_position=cache_position,
         )
         hidden_states = outputs[0]
-        
+
         if self.pipeline_rank < self.num_pipeline_ranks - 1:
             logits = torch.empty(
                 hidden_states.shape[:-1] + (self.vocab_size,),
