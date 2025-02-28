@@ -1,21 +1,56 @@
 #!/bin/bash
+usage="Usage: $0 -p <nproc> -m <mode> -M <model> -V <model_version>  \
+        [-i <eval_nItrs>] [-b <batch_size>] [-d <dataset>] [-t <max_tokens>]"
 
-if [ $# -lt 6 ]; then
-  echo "Usage: $0 <nproc> <mode> <eval_nItrs> <batch_size> <model> <model_version>"
+while getopts "p:m:i:b:M:V:d:t:" opt; do
+  case $opt in
+    p)
+      nproc=$OPTARG
+      ;;
+    m)
+      mode=$OPTARG
+      ;;
+    i)
+      eval_nItrs=$OPTARG
+      ;;
+    b)
+      batch_size=$OPTARG
+      ;;
+    M)
+      model=$OPTARG
+      ;;
+    V)
+      model_version=$OPTARG
+      ;;
+    d)
+      dataset=$OPTARG
+      ;;
+    t)
+      max_tokens=$OPTARG
+      ;;
+    *)
+      echo $usage
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z "$nproc" ] || [ -z "$mode" ] || [ -z "$model" ] || [ -z "$model_version" ]; then
+  echo $usage
   exit 1
 fi
 
-nproc=${1}
-mode=${2}
-eval_nItrs=${3}
-batch_size=${4}
-model=${5}
-model_version=${6}
-  
 if [ ! -z "$SLURM_NODEID" ]; then
   output_folder="result/job${SLURM_JOB_ID}"
 else
   output_folder="result/${mode}_${model}_single_node"
+  if [ $mode = "eval" ]; then
+    if [ -z "$dataset" ]; then
+        output_folder+="/mmlu"
+    else
+        output_folder+="/$dataset"
+    fi
+  fi
 fi
 output_file="${mode}_${model}_${model_version}_single_node.txt"
 
@@ -30,7 +65,19 @@ CMD="torchrun \
     --standalone \
     --nnodes=1 \
     --nproc-per-node=$nproc \
-    run.py --mode $mode --model $model --model_version $model_version --eval_nItrs $eval_nItrs"
+    run.py --mode $mode --model $model --model_version $model_version "
+if [ ! -z "$eval_nItrs" ]; then
+  CMD+="--eval_nItrs $eval_nItrs "
+fi
+if [ ! -z "$batch_size" ]; then
+  CMD+="--batch_size $batch_size "
+fi
+if [ ! -z "$dataset" ]; then
+  CMD+="--dataset $dataset "
+fi
+if [ ! -z "$max_tokens" ]; then
+  CMD+="--max_tokens $max_tokens "
+fi
 
 if [ $mode = "measure" ]; then
    for N in 1 2 4 8 16 32 64 128 256
@@ -43,12 +90,10 @@ elif [ $mode = "nsys_profile" ]; then
       --cuda-memory-usage=true \
       --python-backtrace=cuda --trace-fork-before-exec=true \
       -f true -o $output_folder/$output_file \
-      $CMD --max_tokens 5 --batch_size $batch_size
-
-elif [ $mode = "profile" ]; then
-    $CMD --batch_size $batch_size
+      $CMD
 
 else
-    $CMD --batch_size $batch_size >> $output_folder/$output_file
+    $CMD >> $output_folder/$output_file
+    
 fi
 

@@ -12,7 +12,7 @@ import torch
 import torch.distributed as dist
 from torchinfo import summary
 from util import setup_seed, load_data, get_nnodes
-from engine.utils import getModelandTokenizeer
+from engine.utils import getModelandTokenizeer, evaluation
 from engine.generate import generate, measure_generate, nsys_profile_generate
 
 
@@ -31,6 +31,8 @@ def run(
     model_version: Optional[str],
     use_cache: bool,
     prompt: str,
+    ntrain: int,
+    dataset: str,
 ):
     model, tokenizer = getModelandTokenizeer(
         WORLD_RANK,
@@ -46,12 +48,16 @@ def run(
         model_version,
     )
     model.eval()
-    prompts = load_data(prompt_path, True, LOCAL_RANK)
-    while len(prompts) < batch_size:
-        prompts.extend(prompts[: min(len(prompts), batch_size - len(prompts))])
-    eval_nItrs = min(
-        len(prompts) // batch_size + ((len(prompts) % batch_size) > 0), eval_nItrs
-    )
+
+    def get_prompts():
+        nonlocal eval_nItrs
+        prompts = load_data(prompt_path, True, LOCAL_RANK)
+        while len(prompts) < batch_size:
+            prompts.extend(prompts[: min(len(prompts), batch_size - len(prompts))])
+        eval_nItrs = min(
+            len(prompts) // batch_size + ((len(prompts) % batch_size) > 0), eval_nItrs
+        )
+        return prompts
 
     if mode == "printModel":
         for current_rank in range(WORLD_SIZE):
@@ -80,6 +86,7 @@ def run(
         dist.barrier()
 
     elif mode == "genText":
+        prompts = get_prompts()
         for i in range(eval_nItrs):
             responses = generate(
                 prompts[
@@ -104,6 +111,7 @@ def run(
         dist.barrier()
 
     elif mode == "measure":
+        prompts = get_prompts()
         if LOCAL_RANK == 0:
             for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
                 generate(
@@ -154,10 +162,10 @@ def run(
                     f"Prefill time: {prefill_time:.2f} s, Decode time: {(decode_time):.2f} s, Prefill throughput: {n_prefill_tokens / prefill_time:.2f} tokens/s, Decode throughtput: {(n_decode_tokens / decode_time):.2f} tokens/s"
                 )
                 print("-" * 100)
-
             dist.barrier()
 
     elif mode == "nsys_profile":
+        prompts = get_prompts()
         if LOCAL_RANK == 0:
             for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
                 generate(
@@ -191,44 +199,8 @@ def run(
             top_p=P,
         )
 
-    elif mode == "profile":
-        if LOCAL_RANK == 0:
-            for _ in tqdm(range(warmup_iters), desc="GPU warmup"):
-                generate(
-                    [prompts[0]],
-                    tokenizer,
-                    model,
-                    max_tokens=max_tokens,
-                    temperature=T,
-                    top_p=P,
-                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-                )
-        else:
-            for _ in range(warmup_iters):
-                generate(
-                    [prompts[0]],
-                    tokenizer,
-                    model,
-                    max_tokens=max_tokens,
-                    temperature=T,
-                    top_p=P,
-                    eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-                )
-        dist.barrier()
-        profile_generate(
-            [prompts[0]],
-            tokenizer,
-            model,
-            max_tokens=max_tokens,
-            temperature=T,
-            top_p=P,
-            eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-            distribued=True,
-            local_rank=LOCAL_RANK,
-            result_folder=f"./profile_result_dist_{model_name}_{model_version}",
-        )
-
-    elif mode == "eval":
+    elif mode == "ppy":
+        prompts = get_prompts()
         for i in range(eval_nItrs):
             _, logprobs = generate(
                 prompts[
@@ -248,6 +220,18 @@ def run(
                     ppl = math.exp(avgnll)
                     print(f"eval_nItrs{i} (batch_size={batch_size}): PPL={ppl}")
             dist.barrier()
+
+    elif mode == "eval":
+        evaluation(
+            NNODES,
+            WORLD_RANK,
+            model_name,
+            model_version,
+            model,
+            tokenizer,
+            ntrain,
+            dataset,
+        )
 
     dist.barrier()
 
@@ -280,7 +264,7 @@ if __name__ == "__main__":
             "printModel",
             "measure",
             "nsys_profile",
-            "profile",
+            "ppy",
             "eval",
             "interative",
         ],
@@ -322,6 +306,10 @@ if __name__ == "__main__":
         ],
     )
     parser.add_argument("--use_cache", type=eval, default=True)
+    parser.add_argument("--ntrain", type=int, default=5)
+    parser.add_argument(
+        "--dataset", type=str, default="mmlu", choices=["mmlu", "tmmluplus"]
+    )
     args = parser.parse_args()
 
     setup_seed(args.seed)
@@ -356,5 +344,7 @@ if __name__ == "__main__":
         args.model_version,
         args.use_cache,
         args.prompt,
+        args.ntrain,
+        args.dataset,
     )
     dist.destroy_process_group()

@@ -3,6 +3,7 @@ ntu_paslab_llm
 *Sequoia
 *.nys-rep
 workspace/prompts/*_bench
+workspace/dataset
 *weights
 *.nsys-rep
 result
