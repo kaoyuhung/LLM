@@ -966,6 +966,8 @@ class Transformer(DeepseekPreTrainedModel):
                 self.lm_head = ColumnParallelLinear(
                     config.hidden_size,
                     config.tp_vocab_size,
+                    config.vocab_size,
+                    config.vocab_start_idx,
                     self.num_tp_ranks,
                     tp_group,
                     bias=False,

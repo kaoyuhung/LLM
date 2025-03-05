@@ -44,9 +44,7 @@ class ColumnParallelLinear(nn.Linear):
         self.tp_group = tp_group
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        # You can add any preprocessing or custom logic here
         output = super().forward(input)
-        # You can add any post-processing logic here
         all_outputs = [torch.empty_like(output) for _ in range(self.num_tp_ranks)]
         dist.all_gather(all_outputs, output, group=self.tp_group)
         return torch.cat(all_outputs, dim=-1)

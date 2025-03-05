@@ -460,7 +460,6 @@ class MixtralSdpaAttention(MixtralAttention):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
             )
-
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
@@ -529,8 +528,6 @@ class MixtralSdpaAttention(MixtralAttention):
 
         attn_output = self.o_proj(attn_output)
 
-        # print(f"{self.layer_idx} attn: {attn_output.sum()}")
-
         return attn_output, None, past_key_value
 
 
@@ -592,12 +589,14 @@ class MixtralSparseMoeBlock(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """ """
-        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        # batch_size, sequence_length, hidden_dim = hidden_states.shape
+        orig_shape = hidden_states.shape
         if self.training and self.jitter_noise > 0:
             hidden_states *= torch.empty_like(hidden_states).uniform_(
                 1.0 - self.jitter_noise, 1.0 + self.jitter_noise
             )
-        hidden_states = hidden_states.view(-1, hidden_dim)
+        # hidden_states = hidden_states.view(-1, hidden_dim)
+        hidden_states = hidden_states.view(-1, orig_shape[-1])
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
 
@@ -609,43 +608,78 @@ class MixtralSparseMoeBlock(nn.Module):
         # we cast back to the input dtype
         routing_weights = routing_weights.to(hidden_states.dtype)
 
-        final_hidden_states = torch.zeros(
-            (batch_size * sequence_length, hidden_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
+        # print(
+        #     f"Moe in: {hidden_states.sum()} {router_logits.sum()} {selected_experts.sum()} {routing_weights.sum()} {self.gate.weight.sum()}"
+        # )
 
-        # One hot encode the selected experts to create an expert mask
-        # this will be used to easily index which expert is going to be sollicitated
-        expert_mask = torch.nn.functional.one_hot(
-            selected_experts, num_classes=self.num_experts
-        ).permute(2, 1, 0)
+        final_hidden_states = self.moe_infer(
+            hidden_states, selected_experts, routing_weights
+        ).view(*orig_shape)
 
-        # Loop over all available experts in the model and perform the computation on each expert
-        for expert_idx in range(self.num_experts):
-            expert_layer = self.experts[expert_idx]
-            idx, top_x = torch.where(expert_mask[expert_idx])
+        # final_hidden_states = torch.zeros(
+        #     (batch_size * sequence_length, hidden_dim),
+        #     dtype=hidden_states.dtype,
+        #     device=hidden_states.device,
+        # )
 
-            # Index the correct hidden states and compute the expert hidden state for
-            # the current expert. We need to make sure to multiply the output hidden
-            # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
-            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
-            current_hidden_states = (
-                expert_layer(current_state) * routing_weights[top_x, idx, None]
-            )
+        # # One hot encode the selected experts to create an expert mask
+        # # this will be used to easily index which expert is going to be sollicitated
+        # expert_mask = torch.nn.functional.one_hot(
+        #     selected_experts, num_classes=self.num_experts
+        # ).permute(2, 1, 0)
 
-            # However `index_add_` only support torch tensors for indexing so we'll use
-            # the `top_x` tensor here.
-            final_hidden_states.index_add_(
-                0, top_x, current_hidden_states.to(hidden_states.dtype)
-            )
-        final_hidden_states = final_hidden_states.reshape(
-            batch_size, sequence_length, hidden_dim
-        )
+        # # Loop over all available experts in the model and perform the computation on each expert
+        # for expert_idx in range(self.num_experts):
+        #     expert_layer = self.experts[expert_idx]
+        #     idx, top_x = torch.where(expert_mask[expert_idx])
 
-        #print(f"moe: {final_hidden_states.sum()}")
+        #     # Index the correct hidden states and compute the expert hidden state for
+        #     # the current expert. We need to make sure to multiply the output hidden
+        #     # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
+        #     current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+        #     current_hidden_states = (
+        #         expert_layer(current_state) * routing_weights[top_x, idx, None]
+        #     )
+
+        #     # However `index_add_` only support torch tensors for indexing so we'll use
+        #     # the `top_x` tensor here.
+        #     final_hidden_states.index_add_(
+        #         0, top_x, current_hidden_states.to(hidden_states.dtype)
+        #     )
+        # final_hidden_states = final_hidden_states.reshape(
+        #     batch_size, sequence_length, hidden_dim
+        # )
 
         return final_hidden_states, router_logits
+
+    @torch.no_grad()
+    def moe_infer(self, x, topk_ids, topk_weight):
+        cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
+        cnts.scatter_(1, topk_ids, 1)
+        tokens_per_expert = cnts.sum(dim=0).cpu().numpy()
+        idxs = topk_ids.view(-1).argsort()
+        sorted_tokens = x[idxs // topk_ids.shape[1]]
+        outputs = []
+        start_idx = 0
+        for i, num_tokens in enumerate(tokens_per_expert):
+            if num_tokens == 0:
+                continue
+            end_idx = start_idx + num_tokens
+            expert = self.experts[i]
+            tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
+            expert_out = expert(tokens_for_this_expert)
+            outputs.append(expert_out)
+            start_idx = end_idx
+
+        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
+        new_x = torch.empty_like(outs)
+        new_x[idxs] = outs
+        final_out = (
+            new_x.view(*topk_ids.shape, -1)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+        )
+        return final_out
 
 
 class MixtralDecoderLayer(nn.Module):
@@ -702,7 +736,6 @@ class MixtralDecoderLayer(nn.Module):
         """
 
         residual = hidden_states
-
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
