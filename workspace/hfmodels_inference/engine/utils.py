@@ -330,6 +330,8 @@ def getModelandTokenizeer(
             local_dir=model_path,
         )
 
+    dist.barrier()
+
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     if model_name == "deepseek-moe-16b-chat":

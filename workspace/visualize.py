@@ -1,6 +1,7 @@
 import os
 import re
 import argparse
+import json
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import defaultdict
@@ -91,120 +92,47 @@ def draw_throughput(folder):
         plt.savefig(f"{folder}/{stage}_figure")
 
 
-# def draw_C(folder, n_thread):
-#     x = []
-#     y_ref_dict = defaultdict(list)
-#     y_miss_dict = defaultdict(list)
-#     for subfolder in os.listdir(folder):
-#         if not subfolder.startswith("N"):
-#             continue
-#         x.append(int(subfolder.split("_")[1]))
-#         subfolder_path = os.path.join(folder, subfolder, f"OMP_{n_thread}")
-#         for file in os.listdir(subfolder_path):
-#             if not file.startswith("cache_test_"):
-#                 continue
-#             method, file_path = file.split(".")[0][len("cache_test_") :], os.path.join(
-#                 subfolder_path, file
-#             )
+def draw_ACC(folder, dataset):
+    x = []
+    y_dict = dict()
+    for subfolder in os.listdir(folder):
+        subfolder_path = os.path.join(folder, subfolder)
+        if os.path.isdir(subfolder_path) and subfolder.startswith("eval_"):
+            model = subfolder.split("_")[1]
+            with open(
+                os.path.join(
+                    subfolder_path,
+                    dataset,
+                    f"eval_{model}_EP",
+                    "processed_results.json",
+                )
+            ) as f:
+                acc_dict = json.load(f)["subcategories"]
+            y_dict[model] = acc_dict
 
-#             n_cache_ref, n_cache_miss = None, None
-#             with open(file_path, "r") as file:
-#                 lines = file.readlines()
-#                 if not lines:
-#                     raise ValueError("File is empty")
+    x_labels = list(list(y_dict.values())[0].keys())
+    x = np.arange(len(x_labels)) * 1.2
+    width = 0.18
 
-#                 for line in lines:
-#                     line = line.strip()
-#                     if "cache-references" in line:
-#                         n_cache_ref = int(line.split(" ")[0].replace(",", ""))
+    fig, ax = plt.subplots(figsize=(27, 6))
+    ax.set_title(f"Accuracy on {dataset.upper()} benchmark")
+    ax.set_xticks(x, x_labels)
 
-#                     if "cache-misses" in line:
-#                         n_cache_miss = int(line.split(" ")[0].replace(",", ""))
-#             y_ref_dict[method].append(n_cache_ref / 10e6)
-#             y_miss_dict[method].append(n_cache_miss / n_cache_ref)
+    for i, (model, val) in enumerate(y_dict.items()):
+        y = [val[label] for label in x_labels]
+        ax.bar(
+            x + (i * width) - (2 * width),
+            np.array(y),
+            label=model,
+            width=width,
+        )
 
-#     x = np.array(x)
-#     width = 0.18
-#     sort_idx = np.argsort(x)
-#     x = np.sort(x)
+    ax.set_xlabel("category")
+    ax.set_ylabel("accuarcy")
+    ax.legend()
+    plt.savefig(f"{folder}/Accuarcy_{dataset.upper()}")
 
-#     fig, ax = plt.subplots()
-#     ax.set_title("#Cache-Reference Comparison")
-#     ax.set_xticks(x)
-
-#     ax.bar(
-#         x - 2.5 * width + width / 2,
-#         np.array(y_ref_dict["baseline"])[sort_idx],
-#         label="baseline",
-#         width=width,
-#     )
-#     ax.bar(
-#         x - 1.5 * width + width / 2,
-#         np.array(y_ref_dict["QuEST"])[sort_idx],
-#         label="QuEST",
-#         width=width,
-#     )
-#     ax.bar(
-#         x - 0.5 * width + width / 2,
-#         np.array(y_ref_dict["merged_static"])[sort_idx],
-#         label="batched_static",
-#         width=width,
-#     )
-#     ax.bar(
-#         x + 0.5 * width + width / 2,
-#         np.array(y_ref_dict["merged_dynamic"])[sort_idx],
-#         label="batched_dynamic",
-#         width=width,
-#     )
-#     ax.bar(
-#         x + 1.5 * width + width / 2,
-#         np.array(y_ref_dict["merged_sort_dynamic"])[sort_idx],
-#         label="batched_sort_dynamic",
-#         width=width,
-#     )
-#     ax.set_xlabel("Number of Qubits")
-#     ax.set_ylabel("#cache-refences (M)")
-#     ax.legend()
-#     plt.savefig(f"{folder}/cache_ref_figure")
-
-#     fig, ax = plt.subplots()
-#     ax.set_title("Cache-Miss Ratio Comparison")
-#     ax.set_xticks(x)
-
-#     ax.bar(
-#         x - 2.5 * width + width / 2,
-#         np.array(y_miss_dict["baseline"])[sort_idx],
-#         label="baseline",
-#         width=width,
-#     )
-#     ax.bar(
-#         x - 1.5 * width + width / 2,
-#         np.array(y_miss_dict["QuEST"])[sort_idx],
-#         label="QuEST",
-#         width=width,
-#     )
-#     ax.bar(
-#         x - 0.5 * width + width / 2,
-#         np.array(y_miss_dict["merged_static"])[sort_idx],
-#         label="batched_static",
-#         width=width,
-#     )
-#     ax.bar(
-#         x + 0.5 * width + width / 2,
-#         np.array(y_miss_dict["merged_dynamic"])[sort_idx],
-#         label="batched_dynamic",
-#         width=width,
-#     )
-#     ax.bar(
-#         x + 1.5 * width + width / 2,
-#         np.array(y_miss_dict["merged_sort_dynamic"])[sort_idx],
-#         label="batched_sort_dynamic",
-#         width=width,
-#     )
-#     ax.set_xlabel("Number of Qubits")
-#     ax.set_ylabel("cache-miss ratio")
-#     ax.legend()
-#     plt.savefig(f"{folder}/cache_miss_figure")
+    return
 
 
 if __name__ == "__main__":
@@ -216,8 +144,23 @@ if __name__ == "__main__":
         default="",
         help="draw the figure showing comparison between configurations of different M",
     )
+    parser.add_argument(
+        "-a",
+        type=str,
+        default="",
+        help="draw the figure showing accuracy",
+    )
+    parser.add_argument(
+        "-d",
+        type=str,
+        default="mmlu",
+        help="dataset",
+    )
 
     args = parser.parse_args()
 
     if args.t:
         draw_throughput(args.t)
+
+    if args.a:
+        draw_ACC(args.a, args.d)
