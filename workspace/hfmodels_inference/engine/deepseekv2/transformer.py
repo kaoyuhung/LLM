@@ -17,7 +17,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" PyTorch DeepSeek model."""
+"""PyTorch DeepSeek model."""
 import math
 import os
 import re
@@ -137,7 +137,7 @@ def load_state_dict(
     map_location: Optional[Union[str, torch.device]] = None,
     weights_only: bool = True,
 ):
-    
+
     if not os.path.exists(checkpoint_file):
         return {}
     """
@@ -146,6 +146,7 @@ def load_state_dict(
     layer_start_idx = config.layer_start_idx
     layer_end_idx = config.layer_end_idx
     num_hidden_layers = config.num_hidden_layers
+    total_num_hidden_layers = getattr(config, "total_num_hidden_layers", None)
     q_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
     v_head_dim = config.v_head_dim
     qk_rope_head_dim = config.qk_rope_head_dim
@@ -165,6 +166,15 @@ def load_state_dict(
     expert_start_idx = getattr(config, "expert_start_idx", None)
     expert_end_idx = getattr(config, "expert_end_idx", None)
 
+    if total_num_hidden_layers:
+        layer_mapping = {id: id for id in range(num_hidden_layers // 2)}
+        layer_mapping.update(
+            {
+                total_num_hidden_layers - (num_hidden_layers - id): id
+                for id in range(num_hidden_layers // 2, num_hidden_layers)
+            }
+        )
+
     if checkpoint_file.endswith(".safetensors") and is_safetensors_available():
         # Check format of the archive
         state_dict = {}
@@ -178,8 +188,15 @@ def load_state_dict(
             for param_name in f.keys():
                 if param_name.startswith("model.layers"):
                     layer_id = int(param_name.split(".")[2])
+
+                    if total_num_hidden_layers:
+                        if layer_id not in layer_mapping:
+                            continue
+                        layer_id = layer_mapping[layer_id]
+
                     if layer_id < layer_start_idx or layer_id >= layer_end_idx:
                         continue
+
                     if (
                         expert_start_idx != None
                         and param_name.split(".")[-4] == "experts"
@@ -200,6 +217,13 @@ def load_state_dict(
                         continue
 
                 param = f.get_tensor(param_name)
+                if param_name.startswith("model.layers"):
+                    old_layer_id = int(param_name.split(".")[2])
+                    if layer_id != old_layer_id:
+                        param_name = re.sub(
+                            str(old_layer_id), str(layer_id), param_name, count=1
+                        )
+
                 key = param_name.split(".")[-2]
                 if key == "embed_tokens" and vocab_start_idx != None:
                     param = param[vocab_start_idx:vocab_end_idx]
@@ -567,7 +591,9 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
             use_legacy_cache = not isinstance(past_key_values, Cache)
             if use_legacy_cache:
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            past_key_values_length = past_key_values.get_usable_length(seq_length, layer_idx=self.config.layer_start_idx)
+            past_key_values_length = past_key_values.get_usable_length(
+                seq_length, layer_idx=self.config.layer_start_idx
+            )
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -1092,7 +1118,9 @@ class Transformer(DeepseekV2PreTrainedModel):
     ):
         if past_key_values is not None:
             if isinstance(past_key_values, Cache):
-                cache_length = past_key_values.get_seq_length(layer_idx=self.config.layer_start_idx)
+                cache_length = past_key_values.get_seq_length(
+                    layer_idx=self.config.layer_start_idx
+                )
                 past_length = past_key_values.seen_tokens
                 max_cache_length = past_key_values.get_max_length()
             else:

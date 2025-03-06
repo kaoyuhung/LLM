@@ -34,20 +34,27 @@ class ColumnParallelLinear(nn.Linear):
         self,
         in_features: int,
         out_features: int,
+        out_dim: int,
+        out_dim_start_idx: int,
         num_tp_ranks: int,
         tp_group: dist.distributed_c10d.ProcessGroup,
         bias: bool = False,
         dtype=None,
     ):
         super().__init__(in_features, out_features, bias, dtype=dtype)
+        self.out_dim = out_dim
+        self.out_dim_start_idx = out_dim_start_idx
         self.num_tp_ranks = num_tp_ranks
         self.tp_group = tp_group
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         output = super().forward(input)
-        all_outputs = [torch.empty_like(output) for _ in range(self.num_tp_ranks)]
-        dist.all_gather(all_outputs, output, group=self.tp_group)
-        return torch.cat(all_outputs, dim=-1)
+        outputs = torch.zeros((output.shape[:-1]) + (self.out_dim,)).type_as(input)
+        outputs[
+            :, :, self.out_dim_start_idx : self.out_dim_start_idx + output.shape[-1]
+        ].copy_(output)
+        dist.all_reduce(outputs, group=self.tp_group)
+        return outputs
 
 
 class ParallelEmbedding(nn.Embedding):
