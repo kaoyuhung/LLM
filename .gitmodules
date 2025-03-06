@@ -4,3 +4,6 @@
 [submodule "workspace/hfmodels_inference/llm_model_evaluation"]
 	path = workspace/hfmodels_inference/llm_model_evaluation
 	url = https://github.com/LiuYuWei/llm_model_evaluation.git
+[submodule "workspace/hfmodels_inference/GSM8K-eval"]
+	path = workspace/hfmodels_inference/GSM8K-eval
+	url = https://github.com/Guangxuan-Xiao/GSM8K-eval.git
