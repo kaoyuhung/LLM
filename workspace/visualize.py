@@ -112,9 +112,9 @@ def draw_ACC(folder, dataset):
 
     x_labels = list(list(y_dict.values())[0].keys())
     x = np.arange(len(x_labels)) * 1.2
-    width = 0.18
+    width = 0.15
 
-    fig, ax = plt.subplots(figsize=(27, 6))
+    fig, ax = plt.subplots(figsize=(28, 6))
     ax.set_title(f"Accuracy on {dataset.upper()} benchmark")
     ax.set_xticks(x, x_labels)
 
