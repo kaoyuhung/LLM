@@ -2,7 +2,7 @@
 
 #Batch Job Paremeters
 #SBATCH --account=GOV113121
-#SBATCH --partition=dev
+#SBATCH --partition=normal
 #SBATCH --ntasks-per-node=1             # one torchrun per node https://stackoverflow.com/a/65897194
 #SBATCH --cpus-per-gpu=4
 #SBATCH --mail-type=END,BEGIN           # Send the mail when the job starts and finishes.
