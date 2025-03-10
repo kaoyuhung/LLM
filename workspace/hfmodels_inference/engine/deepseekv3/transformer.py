@@ -144,6 +144,7 @@ def load_state_dict(
     layer_end_idx = config.layer_end_idx
     num_hidden_layers = config.num_hidden_layers
     total_num_hidden_layers = getattr(config, "total_num_hidden_layers", None)
+    partition_strategy = getattr(config, "partition_strategy", None)
     q_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
     v_head_dim = config.v_head_dim
     qk_rope_head_dim = config.qk_rope_head_dim
@@ -164,13 +165,49 @@ def load_state_dict(
     expert_end_idx = getattr(config, "expert_end_idx", None)
 
     if total_num_hidden_layers:
-        layer_mapping = {id: id for id in range(num_hidden_layers // 2)}
-        layer_mapping.update(
-            {
-                total_num_hidden_layers - (num_hidden_layers - id): id
-                for id in range(num_hidden_layers // 2, num_hidden_layers)
-            }
-        )
+        if partition_strategy == 1:
+            num_pre_layer = (
+                num_hidden_layers // 2 + 1
+                if num_hidden_layers & 1
+                else num_hidden_layers // 2
+            )
+            num_post_layer = num_hidden_layers // 2
+
+            if num_pre_layer > total_num_hidden_layers // 4:
+                st = 2 * num_pre_layer - total_num_hidden_layers // 2
+                pre_layer_mapping = {i: i for i in range(st)}
+                num_pre_layer -= st
+            else:
+                st, pre_layer_mapping = 0, {}
+
+            for i in range(num_pre_layer):
+                pre_layer_mapping[st + 2 * i] = st + i
+
+            if num_post_layer > total_num_hidden_layers // 4:
+                st = 2 * num_post_layer - total_num_hidden_layers // 2
+                post_layer_mapping = {
+                    total_num_hidden_layers - i - 1: num_hidden_layers - i - 1
+                    for i in range(st)
+                }
+                num_post_layer -= st
+            else:
+                st, post_layer_mapping = 0, {}
+
+            for i in range(num_post_layer):
+                post_layer_mapping[total_num_hidden_layers - st - 2 * i - 1] = (
+                    num_hidden_layers - st - i - 1
+                )
+
+            pre_layer_mapping.update(post_layer_mapping)
+            layer_mapping = pre_layer_mapping
+        elif partition_strategy == 2:
+            layer_mapping = {id: id for id in range(num_hidden_layers // 2)}
+            layer_mapping.update(
+                {
+                    total_num_hidden_layers - (num_hidden_layers - id): id
+                    for id in range(num_hidden_layers // 2, num_hidden_layers)
+                }
+            )
 
     if checkpoint_file.endswith(".safetensors") and is_safetensors_available():
         # Check format of the archive
