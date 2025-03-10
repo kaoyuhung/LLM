@@ -12,7 +12,7 @@ import torch
 import torch.distributed as dist
 from torchinfo import summary
 from util import setup_seed, load_data, get_nnodes
-from engine.utils import getModelandTokenizeer, evaluation
+from engine.utils import getModelandTokenizeer
 from engine.generate import generate, measure_generate, nsys_profile_generate
 
 
@@ -222,16 +222,26 @@ def run(
             dist.barrier()
 
     elif mode == "eval":
-        evaluation(
-            NNODES,
-            WORLD_RANK,
-            model_name,
-            model_version,
-            model,
-            tokenizer,
-            ntrain,
-            dataset,
-        )
+        if dataset == "mmlu" or dataset == "tmmluplus":
+            from engine.utils import evalMMLU
+
+            evalMMLU(
+                NNODES,
+                WORLD_RANK,
+                model_name,
+                model_version,
+                model,
+                tokenizer,
+                ntrain,
+                dataset,
+            )
+
+        elif dataset == "GSM8K":
+            from engine.utils import evalGSM8K
+
+            evalGSM8K(
+                NNODES, WORLD_RANK, model_name, model_version, model, tokenizer, ntrain
+            )
 
     dist.barrier()
 
@@ -308,7 +318,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_cache", type=eval, default=True)
     parser.add_argument("--ntrain", type=int, default=5)
     parser.add_argument(
-        "--dataset", type=str, default="mmlu", choices=["mmlu", "tmmluplus"]
+        "--dataset", type=str, default="mmlu", choices=["mmlu", "tmmluplus", "GSM8K"]
     )
     args = parser.parse_args()
 

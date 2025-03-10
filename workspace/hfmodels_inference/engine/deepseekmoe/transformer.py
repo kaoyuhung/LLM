@@ -17,7 +17,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" PyTorch DeepSeek model."""
+"""PyTorch DeepSeek model."""
 import os
 import math
 import re
@@ -1137,7 +1137,7 @@ class Transformer(DeepseekPreTrainedModel):
                     layer_idx=self.config.layer_start_idx
                 )
                 past_length = past_key_values.seen_tokens
-                max_cache_length = past_key_values.get_max_length()
+                max_cache_length = past_key_values.get_max_cache_shape()
             else:
                 cache_length = past_length = past_key_values[0][0].shape[2]
                 max_cache_length = None

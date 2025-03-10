@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import json
 import numpy as np
@@ -9,15 +10,128 @@ import torch.distributed as dist
 from transformers import AutoTokenizer
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer, GenerationConfig
+from tqdm import tqdm
+
+
+@torch.no_grad
+def evalGSM8K(
+    nnodes,
+    world_rank,
+    model_name,
+    model_version,
+    model,
+    tokenizer,
+    N_SHOT,
+    COT_FLAG=True,
+):
+
+    def generate(model, tokenizer, input_text, generate_kwargs):
+        input_text = tokenizer(
+            input_text,
+            padding=False,
+            add_special_tokens=True,
+            return_tensors="pt",
+        )
+        input_ids = input_text.input_ids.to(model.device)
+        attention_mask = input_text.attention_mask.to(model.device)
+
+        output_ids = model.generate(
+            input_ids=input_ids, attention_mask=attention_mask, **generate_kwargs
+        )
+        response = []
+        for i in range(output_ids.shape[0]):
+            response.append(
+                tokenizer.decode(
+                    output_ids[i][input_ids.shape[1] :],
+                    skip_special_tokens=True,
+                    ignore_tokenization_space=True,
+                )
+            )
+
+        if len(response) > 1:
+            return response
+        return response[0]
+
+    sys.path.append("GSM8K_eval")
+    from GSM8K_eval.main import (
+        build_prompt,
+        clean_answer,
+        is_correct,
+        extract_answer_from_output,
+    )
+    from GSM8K_eval.utils import download_url, load_jsonl
+
+    data_dir = Path("../dataset/GSM8K")
+    test_filepath = os.path.join(data_dir, "gsm8k_test.jsonl")
+    if not os.path.exists(test_filepath):
+        download_url(
+            "https://raw.githubusercontent.com/openai/"
+            "grade-school-math/2909d34ef28520753df82a2234c357259d254aa8/"
+            "grade_school_math/data/test.jsonl",
+            data_dir,
+        )
+        os.rename(os.path.join(data_dir, "test.jsonl"), test_filepath)
+
+    list_data_dict = load_jsonl(test_filepath, instruction="question", output="answer")
+
+    answers = []
+    for sample in tqdm(list_data_dict):
+        input_text = build_prompt(sample["instruction"], N_SHOT, COT_FLAG)
+        generate_kwargs = dict(max_new_tokens=256, top_p=0.95, temperature=0.8)
+        model_completion = generate(model, tokenizer, input_text, generate_kwargs)
+        model_answer = clean_answer(model_completion)
+        is_cor = is_correct(model_answer, sample["output"])
+        answers.append(is_cor)
+
+        if world_rank == 0:
+            # print(f"Full input_text:\n{input_text}\n\n")
+            print(
+                f'Question: {sample["instruction"]}\n\n'
+                f'Answers: {extract_answer_from_output(sample["output"])}\n\n'
+                f"Model Answers: {model_answer}\n\n"
+                f"Model Completion: {model_completion}\n\n"
+                f"Is correct: {is_cor}\n\n"
+            )
+
+            print(
+                f"Num of total question: {len(answers)}, "
+                f"Correct num: {sum(answers)}, "
+                f"Accuracy: {float(sum(answers))/len(answers)}."
+            )
+        dist.barrier()
+
+    if "SLURM_JOB_ID" in os.environ:
+        save_dir = (
+            f"result/job{os.environ['SLURM_JOB_ID']}/eval_{model_name}_{model_version}"
+        )
+    else:
+        if nnodes == 1:
+            save_dir = f"result/eval_{model_name}_single_node/QSM8K/eval_{model_name}_{model_version}"
+        else:
+            save_dir = f"result/eval_{model_name}_multinode/QSM8K/eval_{model_name}_{model_version}"
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    if world_rank == 0:
+        with open(os.path.join(save_dir, "results.txt"), "w") as f:
+            for answer in answers:
+                print(answer, file=f)
+
+        with open(os.path.join(save_dir, "scores.txt"), "w") as f:
+            print(
+                f"Num of total question: {len(answers)}, "
+                f"Correct num: {sum(answers)}, "
+                f"Accuracy: {float(sum(answers))/len(answers)}.",
+                file=f,
+            )
+    dist.barrier()
+    return
 
 
 @torch.no_grad()
-def evaluation(
+def evalMMLU(
     nnodes, world_rank, model_name, model_version, model, tokenizer, ntrain, dataset
 ):
-
-    import sys
-
     sys.path.append("llm_model_evaluation")
     from llm_model_evaluation.config.log_config import logging
     from llm_model_evaluation.evaluation_hf_testing import (
@@ -174,6 +288,8 @@ def evaluation(
 
                 elif filename.endswith("val.csv"):
                     shutil.move(file_path, data_dir / "val" / filename)
+
+    dist.barrier()
 
     if world_rank == 0:
         os.mkdir(save_dir)
