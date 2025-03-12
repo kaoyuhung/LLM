@@ -110,7 +110,7 @@ def draw_ACC(folder, dataset):
                 acc_dict = json.load(f)["subcategories"]
             y_dict[model] = acc_dict
 
-    x_labels = list(list(y_dict.values())[0].keys())
+    x_labels = sorted(list(list(y_dict.values())[0].keys()))
     x = np.arange(len(x_labels)) * 1.2
     width = 0.15
 
