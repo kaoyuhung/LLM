@@ -1013,7 +1013,7 @@ class Transformer(MixtralPreTrainedModel, GenerationMixin):
         # exit()
 
         if self.num_tp_ranks > 1:
-
+            assert self.vocab_size % self.num_tp_ranks == 0
             # Split Vocabulary Size
             remainder = self.vocab_size % self.num_tp_ranks
             tp_vocab_size = self.vocab_size // self.num_tp_ranks
@@ -1150,8 +1150,6 @@ class Transformer(MixtralPreTrainedModel, GenerationMixin):
                 self.lm_head = ColumnParallelLinear(
                     config.hidden_size,
                     config.tp_vocab_size,
-                    config.vocab_size,
-                    config.vocab_start_idx,
                     self.num_tp_ranks,
                     tp_group,
                     bias=False,

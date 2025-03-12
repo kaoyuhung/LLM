@@ -793,6 +793,7 @@ class Transformer(DeepseekV2PreTrainedModel):
         # exit()
 
         if self.num_tp_ranks > 1:
+            assert self.vocab_size % self.num_tp_ranks == 0
             # Split Vocabulary Size
             remainder = config.vocab_size % self.num_tp_ranks
             tp_vocab_size = config.vocab_size // self.num_tp_ranks
@@ -967,8 +968,6 @@ class Transformer(DeepseekV2PreTrainedModel):
                 self.lm_head = ColumnParallelLinear(
                     config.hidden_size,
                     config.tp_vocab_size,
-                    config.vocab_size,
-                    config.vocab_start_idx,
                     self.num_tp_ranks,
                     tp_group,
                     bias=False,
