@@ -11,3 +11,4 @@ profile_result*
 workspace/test
 examples
 test*.py
+*.vscode

@@ -23,6 +23,7 @@ def generate(
 
     B = len(prompts)
     inputs = tokenizer(prompts, padding=True, return_tensors="pt").to(model.device)
+
     is_finished, generated_tokens = torch.tensor([False for _ in range(B)]), []
 
     if use_cache:
@@ -36,7 +37,6 @@ def generate(
         # )
         for _ in range(max_new_tokens):
             outputs = model(**inputs, past_key_values=past_key_values, use_cache=True)
-            # next_token_ids = outputs.logits[:, -1:].argmax(-1)
             next_token_ids = sample(
                 outputs.logits[:, -1:], temperature=temperature, top_p=top_p
             )
@@ -49,7 +49,9 @@ def generate(
             if is_finished.all():
                 break
             next_token_ids = next_token_ids[:, None]
-            generated_tokens.append(next_token_ids.cpu())
+            # generated_tokens.append(
+            #     torch.where(~is_finished, next_token_ids.cpu(), eos_id)
+            # )
             attention_mask = inputs["attention_mask"]
             attention_mask = torch.cat(
                 [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
@@ -60,7 +62,6 @@ def generate(
         generated_ids = inputs.input_ids
         for _ in range(max_new_tokens):
             outputs = model(**inputs, use_cache=False)
-            # next_token_ids = outputs.logits[:, -1:].argmax(-1)
             next_token_ids = sample(
                 outputs.logits[:, -1:], temperature=temperature, top_p=top_p
             )

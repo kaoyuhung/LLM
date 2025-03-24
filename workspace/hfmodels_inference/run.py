@@ -264,7 +264,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--max_tokens", type=int, default=128)
     parser.add_argument("--T", type=float, default=0, help="temperature")
-    parser.add_argument("--P", type=float, default=0.9, help="top_p")
+    parser.add_argument("--P", type=float, default=1, help="top_p")
     parser.add_argument(
         "--mode",
         type=str,
