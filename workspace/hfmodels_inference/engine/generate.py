@@ -31,7 +31,6 @@ def generate(
         # past_key_values = StaticCache(
         #     config=model.config,
         #     max_batch_size=batch_size,
-        #     max_cache_len=inputs["input_ids"].shape[1] + max_new_tokens,
         #     device=model.device,
         #     dtype=model.dtype,
         # )
@@ -49,9 +48,9 @@ def generate(
             if is_finished.all():
                 break
             next_token_ids = next_token_ids[:, None]
-            # generated_tokens.append(
-            #     torch.where(~is_finished, next_token_ids.cpu(), eos_id)
-            # )
+            generated_tokens.append(
+                torch.where(~is_finished.view(B, 1), next_token_ids.cpu(), eos_id)
+            )
             attention_mask = inputs["attention_mask"]
             attention_mask = torch.cat(
                 [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
@@ -74,7 +73,9 @@ def generate(
             if is_finished.all():
                 break
             next_token_ids = next_token_ids[:, None]
-            generated_tokens.append(next_token_ids.cpu())
+            generated_tokens.append(
+                torch.where(~is_finished.view(B, 1), next_token_ids.cpu(), eos_id)
+            )
             attention_mask = inputs["attention_mask"]
             attention_mask = torch.cat(
                 [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
@@ -106,7 +107,6 @@ def measure_generate(
     B = len(prompts)
     inputs = tokenizer(prompts, padding=True, return_tensors="pt").to(model.device)
     n_prefill_tokens = inputs.input_ids.numel()
-    generated_tokens = []
 
     if use_cache:
         past_key_values = DynamicCache()
@@ -126,7 +126,6 @@ def measure_generate(
                 outputs.logits[:, -1:], temperature=temperature, top_p=top_p
             )
             next_token_ids = next_token_ids[:, None]
-            generated_tokens.append(next_token_ids.cpu())
             attention_mask = inputs["attention_mask"]
             attention_mask = torch.cat(
                 [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
@@ -144,7 +143,6 @@ def measure_generate(
                 outputs.logits[:, -1:], temperature=temperature, top_p=top_p
             )
             next_token_ids = next_token_ids[:, None]
-            generated_tokens.append(next_token_ids.cpu())
             attention_mask = inputs["attention_mask"]
             attention_mask = torch.cat(
                 [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))],
@@ -155,7 +153,7 @@ def measure_generate(
 
     dist.barrier()
     t2 = time.time()
-    n_decode_tokens = torch.cat(generated_tokens, 1).numel() - B
+    n_decode_tokens = B * (max_new_tokens - 1)
     return (t1 - t0, t2 - t1, n_prefill_tokens, n_decode_tokens)
 
 
