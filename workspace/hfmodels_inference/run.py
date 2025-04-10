@@ -215,7 +215,7 @@ def run(
             from engine.utils import evalGSM8K
 
             evalGSM8K(
-                NNODES, WORLD_RANK, LOCAL_RANK,model_name, model_version, model, tokenizer, ntrain
+                NNODES, WORLD_RANK, LOCAL_RANK,model_name, model_version, model, tokenizer, ntrain, max_tokens, T, P
             )
 
     dist.barrier()

@@ -23,34 +23,37 @@ def evalGSM8K(
     model,
     tokenizer,
     N_SHOT,
+    max_new_tokens,
+    T,
+    P,
     COT_FLAG=True,
 ):
 
-    def generate(model, tokenizer, input_text, generate_kwargs):
-        input_text = tokenizer(
-            input_text,
-            padding=False,
-            add_special_tokens=True,
-            return_tensors="pt",
-        )
-        input_ids = input_text.input_ids.to(model.device)
-        attention_mask = input_text.attention_mask.to(model.device)
-        output_ids = model.generate(
-            input_ids=input_ids, attention_mask=attention_mask, **generate_kwargs
-        )
-        response = []
-        for i in range(output_ids.shape[0]):
-            response.append(
-                tokenizer.decode(
-                    output_ids[i][input_ids.shape[1] :],
-                    skip_special_tokens=True,
-                    ignore_tokenization_space=True,
-                )
-            )
+    # def generate(model, tokenizer, input_text, generate_kwargs):
+    #     input_text = tokenizer(
+    #         input_text,
+    #         padding=False,
+    #         add_special_tokens=True,
+    #         return_tensors="pt",
+    #     )
+    #     input_ids = input_text.input_ids.to(model.device)
+    #     attention_mask = input_text.attention_mask.to(model.device)
+    #     output_ids = model.generate(
+    #         input_ids=input_ids, attention_mask=attention_mask, **generate_kwargs
+    #     )
+    #     response = []
+    #     for i in range(output_ids.shape[0]):
+    #         response.append(
+    #             tokenizer.decode(
+    #                 output_ids[i][input_ids.shape[1] :],
+    #                 skip_special_tokens=True,
+    #                 ignore_tokenization_space=True,
+    #             )
+    #         )
 
-        if len(response) > 1:
-            return response
-        return response[0]
+    #     if len(response) > 1:
+    #         return response
+    #     return response[0]
 
     sys.path.append("../GSM8K_eval")
     from GSM8K_eval.main import (
@@ -74,7 +77,7 @@ def evalGSM8K(
 
     data_dir = Path("../dataset/GSM8K")
     test_filepath = os.path.join(data_dir, "gsm8k_test.jsonl")
-    if os.path.exists(test_filepath) and (world_rank == 0 or (local_rank == 0 and "SLURM_JOB_ID" not in os.environ)):
+    if not os.path.exists(test_filepath) and (world_rank == 0 or (local_rank == 0 and "SLURM_JOB_ID" not in os.environ)):
         download_url(
             "https://raw.githubusercontent.com/openai/"
             "grade-school-math/2909d34ef28520753df82a2234c357259d254aa8/"
@@ -88,8 +91,19 @@ def evalGSM8K(
     answers = []
     for sample in tqdm(list_data_dict):
         input_text = build_prompt(sample["instruction"], N_SHOT, COT_FLAG)
-        generate_kwargs = dict(max_new_tokens=256, top_p=0.95, temperature=0.8)
-        model_completion = generate(model, tokenizer, input_text, generate_kwargs)
+        # generate_kwargs = dict(max_new_tokens=256, top_p=0.95, temperature=0.8)
+        # model_completion = generate(model, tokenizer, input_text, generate_kwargs)
+        model_completion = generate(
+                [input_text],
+                tokenizer,
+                model,
+                max_new_tokens=max_new_tokens,
+                batch_size=1,
+                temperature=T,
+                top_p=P,
+                use_cache=True,
+                eos_id=model.generation_config.eos_token_id,
+            )[0]
         model_answer = clean_answer(model_completion)
         is_cor = is_correct(model_answer, sample["output"])
         answers.append(is_cor)
