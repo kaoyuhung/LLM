@@ -46,7 +46,7 @@ def generate(
 
             next_token_ids = next_token_ids[:, None]
             generated_tokens.append(
-                torch.where(~is_finished.view(B, 1), next_token_ids, eos_id).cpu()
+                torch.where(~is_finished.view(B, 1), next_token_ids, eos_id[0] if eos_id.dim() == 1 else eos_id).cpu()
             )
             attention_mask = inputs["attention_mask"]
             attention_mask = torch.cat(
