@@ -7,9 +7,9 @@ import pandas as pd
 from pathlib import Path
 import torch
 import torch.distributed as dist
-from transformers import AutoTokenizer
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer, GenerationConfig
+from engine.generate import generate
 from tqdm import tqdm
 
 
@@ -17,6 +17,7 @@ from tqdm import tqdm
 def evalGSM8K(
     nnodes,
     world_rank,
+    local_rank,
     model_name,
     model_version,
     model,
@@ -34,7 +35,6 @@ def evalGSM8K(
         )
         input_ids = input_text.input_ids.to(model.device)
         attention_mask = input_text.attention_mask.to(model.device)
-
         output_ids = model.generate(
             input_ids=input_ids, attention_mask=attention_mask, **generate_kwargs
         )
@@ -52,7 +52,7 @@ def evalGSM8K(
             return response
         return response[0]
 
-    sys.path.append("GSM8K_eval")
+    sys.path.append("../GSM8K_eval")
     from GSM8K_eval.main import (
         build_prompt,
         clean_answer,
@@ -60,10 +60,21 @@ def evalGSM8K(
         extract_answer_from_output,
     )
     from GSM8K_eval.utils import download_url, load_jsonl
+  
+    if "SLURM_JOB_ID" in os.environ:
+        save_dir = (
+            f"result/job{os.environ['SLURM_JOB_ID']}/eval_{model_name}_{model_version}"
+        )
+    else:
+        if nnodes == 1:
+            save_dir = f"result/eval_{model_name}_single_node/QSM8K/eval_{model_name}_{model_version}"
+        else:
+            save_dir = f"result/eval_{model_name}_multinode/QSM8K/eval_{model_name}_{model_version}"
+    os.makedirs(save_dir, exist_ok=True)
 
     data_dir = Path("../dataset/GSM8K")
     test_filepath = os.path.join(data_dir, "gsm8k_test.jsonl")
-    if not os.path.exists(test_filepath):
+    if os.path.exists(test_filepath) and (world_rank == 0 or (local_rank == 0 and "SLURM_JOB_ID" not in os.environ)):
         download_url(
             "https://raw.githubusercontent.com/openai/"
             "grade-school-math/2909d34ef28520753df82a2234c357259d254aa8/"
@@ -71,9 +82,9 @@ def evalGSM8K(
             data_dir,
         )
         os.rename(os.path.join(data_dir, "test.jsonl"), test_filepath)
-
+    dist.barrier()
+    
     list_data_dict = load_jsonl(test_filepath, instruction="question", output="answer")
-
     answers = []
     for sample in tqdm(list_data_dict):
         input_text = build_prompt(sample["instruction"], N_SHOT, COT_FLAG)
@@ -84,34 +95,20 @@ def evalGSM8K(
         answers.append(is_cor)
 
         if world_rank == 0:
-            # print(f"Full input_text:\n{input_text}\n\n")
-            print(
+            tqdm.write(
                 f'Question: {sample["instruction"]}\n\n'
                 f'Answers: {extract_answer_from_output(sample["output"])}\n\n'
                 f"Model Answers: {model_answer}\n\n"
                 f"Model Completion: {model_completion}\n\n"
                 f"Is correct: {is_cor}\n\n"
             )
-
-            print(
+            tqdm.write(
                 f"Num of total question: {len(answers)}, "
                 f"Correct num: {sum(answers)}, "
                 f"Accuracy: {float(sum(answers))/len(answers)}."
             )
         dist.barrier()
-
-    if "SLURM_JOB_ID" in os.environ:
-        save_dir = (
-            f"result/job{os.environ['SLURM_JOB_ID']}/eval_{model_name}_{model_version}"
-        )
-    else:
-        if nnodes == 1:
-            save_dir = f"result/eval_{model_name}_single_node/QSM8K/eval_{model_name}_{model_version}"
-        else:
-            save_dir = f"result/eval_{model_name}_multinode/QSM8K/eval_{model_name}_{model_version}"
-
-    os.makedirs(save_dir, exist_ok=True)
-
+      
     if world_rank == 0:
         with open(os.path.join(save_dir, "results.txt"), "w") as f:
             for answer in answers:
@@ -130,9 +127,9 @@ def evalGSM8K(
 
 @torch.no_grad()
 def evalMMLU(
-    nnodes, world_rank, model_name, model_version, model, tokenizer, ntrain, dataset
+    nnodes, world_rank, local_rank, model_name, model_version, model, tokenizer, ntrain, dataset
 ):
-    sys.path.append("llm_model_evaluation")
+    sys.path.append("../llm_model_evaluation")
     from llm_model_evaluation.config.log_config import logging
     from llm_model_evaluation.evaluation_hf_testing import (
         get_subject,
@@ -243,7 +240,7 @@ def evalMMLU(
 
     # Retrieve list of subjects
     data_dir = Path(f"../dataset/{dataset}")
-    if not data_dir.exists() and world_rank == 0:
+    if not data_dir.exists() and (world_rank == 0 or ("SLURM_JOB_ID" not in os.environ and local_rank == 0)):
         import shutil
 
         if dataset == "mmlu":
@@ -292,7 +289,7 @@ def evalMMLU(
     dist.barrier()
 
     if world_rank == 0:
-        os.mkdir(save_dir)
+        os.makedirs(save_dir, exist_ok=True)
         logging.info("===== [Start] Evaluation by huggingface model ===== ")
         start_time = time.time()
         old_checkpoint_time = start_time
@@ -425,7 +422,7 @@ def getModelandTokenizeer(
     dtype: torch.dtype,
     model_version: str,
 ):
-    model_path = Path(f"weights/{model_name}")
+    model_path = Path(f"../weights/{model_name}")
     if not model_path.exists() and local_rank == 0:
         model_path.mkdir(parents=True)
         if model_name in [
@@ -442,7 +439,7 @@ def getModelandTokenizeer(
 
         snapshot_download(
             repo_id=repo_id,
-            allow_patterns=["*.json", "model-*.safetensors"],
+            allow_patterns=["*.json", "model-*.safetensors", "configuration*.py"],
             local_dir=model_path,
         )
 

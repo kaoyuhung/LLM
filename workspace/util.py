@@ -1,5 +1,6 @@
 import os
 import json
+import random
 import torch
 import torch.distributed as dist
 import numpy as np
@@ -15,6 +16,7 @@ def get_nproc_per_rank(rank: int, device: torch.device):
 
 
 def setup_seed(seed):
+    random.seed(seed)
     torch.manual_seed(seed)  # generating random numbers in PyTorch on the CPU and GPU
     torch.cuda.manual_seed_all(seed)  # generating random numbers on all available GPUs
     np.random.seed(seed)

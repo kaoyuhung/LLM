@@ -1,9 +1,14 @@
 [submodule "ntu_paslab_llm"]
 	path = ntu_paslab_llm
 	url = https://github.com/muchi674/ntu_paslab_llm.git
-[submodule "workspace/hfmodels_inference/llm_model_evaluation"]
-	path = workspace/hfmodels_inference/llm_model_evaluation
+
+[submodule "workspace/GSM8K-eval"]
+	path = workspace/GSM8K-eval
+	url = https://github.com/Guangxuan-Xiao/GSM8K-eval.git
+
+[submodule "workspace/llm_model_evaluation"]
+	path = workspace/llm_model_evaluation
 	url = https://github.com/LiuYuWei/llm_model_evaluation.git
-[submodule "workspace/hfmodels_inference/GSM8K-eval"]
-	path = workspace/hfmodels_inference/GSM8K_eval
+[submodule "workspace/GSM8K_eval"]
+	path = workspace/GSM8K_eval
 	url = https://github.com/Guangxuan-Xiao/GSM8K-eval.git

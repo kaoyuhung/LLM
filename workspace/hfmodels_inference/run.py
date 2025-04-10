@@ -69,19 +69,15 @@ def run(
             dist.barrier()
 
     elif mode == "interative":
-        responses = generate(
-            [prompt],
-            tokenizer,
-            model,
-            max_new_tokens=max_tokens,
-            batch_size=batch_size,
-            temperature=T,
-            top_p=P,
-            use_cache=use_cache,
-            eos_id=model.generation_config.eos_token_id,
-        )
+        messages = [
+            {"role": "user", "content": prompt}
+        ]
+        input_tensor = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt")
+        outputs = model.generate(input_tensor.to(model.device) , max_new_tokens=max_tokens, return_dict_in_generate=True, output_scores=True)
+        output = tokenizer.decode(outputs[0][0][input_tensor.shape[-1]:], skip_special_tokens=True)
+        
         if LOCAL_RANK == 0:
-            print(f"[INST]{prompt}[/INST]\n\nASSISTANT:{responses[0]}")
+            print(f"[INST]{prompt}[/INST]\n\nASSISTANT:{output}")
 
         dist.barrier()
 
@@ -199,28 +195,6 @@ def run(
             top_p=P,
         )
 
-    elif mode == "ppy":
-        prompts = get_prompts()
-        for i in range(eval_nItrs):
-            _, logprobs = generate(
-                prompts[
-                    i * batch_size : i * batch_size
-                    + min(batch_size, len(prompts) - i * batch_size)
-                ],
-                tokenizer,
-                model,
-                max_tokens=max_tokens,
-                temperature=T,
-                top_p=P,
-                eos_id=tokenizer.instruct_tokenizer.tokenizer.eos_id,
-            )
-            if LOCAL_RANK == 0:
-                for logprob in logprobs:
-                    avgnll = -sum(logprob) / len(logprob)
-                    ppl = math.exp(avgnll)
-                    print(f"eval_nItrs{i} (batch_size={batch_size}): PPL={ppl}")
-            dist.barrier()
-
     elif mode == "eval":
         if dataset == "mmlu" or dataset == "tmmluplus":
             from engine.utils import evalMMLU
@@ -228,6 +202,7 @@ def run(
             evalMMLU(
                 NNODES,
                 WORLD_RANK,
+                LOCAL_RANK,
                 model_name,
                 model_version,
                 model,
@@ -240,7 +215,7 @@ def run(
             from engine.utils import evalGSM8K
 
             evalGSM8K(
-                NNODES, WORLD_RANK, model_name, model_version, model, tokenizer, ntrain
+                NNODES, WORLD_RANK, LOCAL_RANK,model_name, model_version, model, tokenizer, ntrain
             )
 
     dist.barrier()
@@ -274,7 +249,6 @@ if __name__ == "__main__":
             "printModel",
             "measure",
             "nsys_profile",
-            "ppy",
             "eval",
             "interative",
         ],

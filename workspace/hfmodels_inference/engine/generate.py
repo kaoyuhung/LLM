@@ -157,9 +157,7 @@ def measure_generate(
     return (t1 - t0, t2 - t1, n_prefill_tokens, n_decode_tokens)
 
 
-torch.inference_mode()
-
-
+@torch.inference_mode()
 def nsys_profile_generate(
     prompts: List[str],
     tokenizer: AutoTokenizer,
