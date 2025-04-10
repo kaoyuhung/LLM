@@ -225,6 +225,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=17, help="random seed")
     parser.add_argument(
+        "-m",
         "--model",
         type=str,
         default="deepseek-moe-16b-chat",
@@ -243,7 +244,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        default="measure",
+        default="genText",
         choices=[
             "genText",
             "printModel",
@@ -270,7 +271,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--eval_nItrs", type=int, default=1)
     parser.add_argument("--warmup_iters", type=int, default=1)
-    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("-b", "--batch_size", type=int, default=1)
     parser.add_argument(
         "--dtype", type=str, default="bfloat16", choices=["float16", "bfloat16"]
     )

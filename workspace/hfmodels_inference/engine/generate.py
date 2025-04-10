@@ -23,8 +23,8 @@ def generate(
 
     B = len(prompts)
     inputs = tokenizer(prompts, padding=True, return_tensors="pt").to(model.device)
-
-    is_finished, generated_tokens = torch.tensor([False for _ in range(B)]), []
+    is_finished, generated_tokens = torch.tensor([False for _ in range(B)], device=model.device), []
+    eos_id = torch.tensor(eos_id, device=model.device)
 
     if use_cache:
         past_key_values = DynamicCache()
@@ -40,16 +40,13 @@ def generate(
                 outputs.logits[:, -1], temperature=temperature, top_p=top_p
             )
             if eos_id is not None:
-                if isinstance(eos_id, list):
-                    for id in eos_id:
-                        is_finished = is_finished | (next_token_ids == id).cpu()
-                else:
-                    is_finished = is_finished | (next_token_ids == eos_id).cpu()
-            if is_finished.all():
-                break
+                is_finished = is_finished | torch.isin(next_token_ids, eos_id)
+                if is_finished.all():
+                    break
+
             next_token_ids = next_token_ids[:, None]
             generated_tokens.append(
-                torch.where(~is_finished.view(B, 1), next_token_ids.cpu(), eos_id)
+                torch.where(~is_finished.view(B, 1), next_token_ids, eos_id).cpu()
             )
             attention_mask = inputs["attention_mask"]
             attention_mask = torch.cat(

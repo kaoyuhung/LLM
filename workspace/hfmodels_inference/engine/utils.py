@@ -70,9 +70,9 @@ def evalGSM8K(
         )
     else:
         if nnodes == 1:
-            save_dir = f"result/eval_{model_name}_single_node/QSM8K/eval_{model_name}_{model_version}"
+            save_dir = f"result/eval_{model_name}_single_node/GSM8K/eval_{model_name}_{model_version}"
         else:
-            save_dir = f"result/eval_{model_name}_multinode/QSM8K/eval_{model_name}_{model_version}"
+            save_dir = f"result/eval_{model_name}_multinode/GSM8K/eval_{model_name}_{model_version}"
     os.makedirs(save_dir, exist_ok=True)
 
     data_dir = Path("../dataset/GSM8K")
