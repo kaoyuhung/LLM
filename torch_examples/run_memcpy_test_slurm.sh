@@ -10,6 +10,9 @@
 #SBATCH --job-name=INFERENCE
 #SBATCH --output=result/job%j/log.out
 
+module purge
+module load cuda
+
 if [ $# -lt 2 ]; then
   echo "Usage: $0 <nccl> <nsys>"
   exit 1

@@ -10,6 +10,9 @@
 #SBATCH --job-name=INFERENCE
 #SBATCH --output=result/job%j/log.out
 
+module purge
+module load cuda
+
 usage="Usage: $0 -m <mode> -M <model> -V <model_version>  \
         [-i <eval_nItrs>] [-b <batch_size>] [-d <dataset>] [-t <max_tokens>]"
 

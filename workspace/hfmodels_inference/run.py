@@ -1,6 +1,5 @@
 import os
 import sys
-import math
 
 sys.path.append("..")
 import argparse
