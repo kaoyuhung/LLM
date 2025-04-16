@@ -12,3 +12,6 @@
 [submodule "workspace/GSM8K_eval"]
 	path = workspace/GSM8K_eval
 	url = https://github.com/Guangxuan-Xiao/GSM8K-eval.git
+[submodule "workspace/myvllm/vllm_repo"]
+	path = workspace/myvllm/vllm_repo
+	url = git@github.com:kaoyuhung/vllm.git
