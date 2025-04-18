@@ -33,7 +33,7 @@ def main(args: argparse.Namespace):
     llm = LLM(**kwargs)
 
     if args.mode == "genText":
-        outputs = llm.generate(prompts, sampling_params)
+        outputs, _ , _ = llm.generate(prompts, sampling_params)
         for output in outputs:
             prompt = output.prompt
             generated_text = output.outputs[0].text
@@ -41,10 +41,9 @@ def main(args: argparse.Namespace):
                 print(f"\nPrompt: {prompt}\n\nGenerated text: {generated_text}\n\n")
 
     elif args.mode == "measure":
-        start = time.perf_counter()
-        outputs = llm.generate(prompts,
+        outputs, prefill_t, decode_t = llm.generate(prompts,
                                sampling_params)
-        elapsed_time = time.perf_counter() - start
+        elapsed_time = prefill_t + decode_t
         total_prompt_tokens = total_output_tokens = 0
 
         for output in outputs:
@@ -56,11 +55,14 @@ def main(args: argparse.Namespace):
 
         if not USE_TORCHRUN or LOCAL_RANK == 0:
             print("-" * 50)
+            print(f"prefill time: {prefill_t:.2f}s")
+            print(f"decoding time: {decode_t:.2f}s")
             print(f"Total num prompt tokens:  {total_prompt_tokens}")
             print(f"Total num output tokens:  {total_output_tokens}")
-            print(f"Throughput - {len(prompts) / elapsed_time:.2f} requests/s")
-            print(f"Throughput - {total_num_tokens / elapsed_time:.2f} total tokens/s")
-            print(f"Throughput - {total_output_tokens / elapsed_time:.2f} output tokens/s")
+            print(f"Prefill Throughput - {total_prompt_tokens / prefill_t:.2f} tokens/s")
+            print(f"Decoding Throughput - {total_output_tokens / decode_t:.2f} tokens/s")
+            print(f"End2End Throughput - {total_num_tokens / elapsed_time:.2f} token/s")
+            print(f"End2End Throughput (request) - {len(prompts) / elapsed_time:.2f} requests/s")
             print("-" * 50)
 
     if USE_TORCHRUN:
