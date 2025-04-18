@@ -1,7 +1,11 @@
+import os
 import time
 import argparse
+import torch.distributed as dist
 from vllm import LLM, SamplingParams
 from utils import setup_seed, get_prompts
+
+USE_TORCHRUN = "WORLD_SIZE" in os.environ
 
 def main(args: argparse.Namespace):
     
@@ -9,12 +13,21 @@ def main(args: argparse.Namespace):
     sampling_params = SamplingParams(temperature=args.T, top_p=args.P, max_tokens=args.max_tokens)
     kwargs = {
         "model" : args.model_path,
+        "pipeline_parallel_size" : args.pp_size,
         "tensor_parallel_size": args.tp_size,
         "cpu_offload_gb": args.cpu_offload_gb,
         "trust_remote_code": True,
-        "max_model_len": args.max_model_len
-
+        "max_model_len": args.max_model_len,
+        "seed" : args.seed
     }
+    if USE_TORCHRUN:
+        LOCAL_RANK = int(os.environ["LOCAL_RANK"])
+        LOCAL_WORLD_SIZE = int(os.environ["LOCAL_WORLD_SIZE"])
+        WORLD_SIZE = int(os.environ["WORLD_SIZE"])
+        WORLD_RANK = int(os.environ["RANK"])
+        NODE_RANK = int(os.environ["GROUP_RANK"])
+        kwargs["distributed_executor_backend"]="external_launcher"
+
     llm = LLM(**kwargs)
 
     if args.mode == "genText":
@@ -22,7 +35,8 @@ def main(args: argparse.Namespace):
         for output in outputs:
             prompt = output.prompt
             generated_text = output.outputs[0].text
-            print(f"\nPrompt: {prompt}\n\nGenerated text: {generated_text}\n\n")
+            if not USE_TORCHRUN or LOCAL_RANK == 0:
+                print(f"\nPrompt: {prompt}\n\nGenerated text: {generated_text}\n\n")
 
     elif args.mode == "measure":
         start = time.perf_counter()
@@ -38,17 +52,22 @@ def main(args: argparse.Namespace):
                 len(o.token_ids) for o in output.outputs if o)
         total_num_tokens = total_prompt_tokens + total_output_tokens
 
-        print("-" * 50)
-        print(f"Total num prompt tokens:  {total_prompt_tokens}")
-        print(f"Total num output tokens:  {total_output_tokens}")
-        print(f"Throughput - {len(prompts) / elapsed_time:.2f} requests/s")
-        print(f"Throughput - {total_num_tokens / elapsed_time:.2f} total tokens/s")
-        print(f"Throughput - {total_output_tokens / elapsed_time:.2f} output tokens/s")
-        print("-" * 50)
+        if not USE_TORCHRUN or LOCAL_RANK == 0:
+            print("-" * 50)
+            print(f"Total num prompt tokens:  {total_prompt_tokens}")
+            print(f"Total num output tokens:  {total_output_tokens}")
+            print(f"Throughput - {len(prompts) / elapsed_time:.2f} requests/s")
+            print(f"Throughput - {total_num_tokens / elapsed_time:.2f} total tokens/s")
+            print(f"Throughput - {total_output_tokens / elapsed_time:.2f} output tokens/s")
+            print("-" * 50)
+
+    if USE_TORCHRUN:
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=17, help="random seed")
+    parser.add_argument("--pp_size", type=int, default=1)
     parser.add_argument("--tp_size", type=int, default=1)
     parser.add_argument("--cpu_offload_gb", type=int, default=0)
     parser.add_argument(
