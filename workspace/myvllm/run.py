@@ -18,7 +18,9 @@ def main(args: argparse.Namespace):
         "cpu_offload_gb": args.cpu_offload_gb,
         "trust_remote_code": True,
         "max_model_len": args.max_model_len,
-        "seed" : args.seed
+        "seed" : args.seed,
+        "enforce_eager" : args.enforce_eager,
+        'gpu_memory_utilization' : args.gpu_memory_utilization
     }
     if USE_TORCHRUN:
         LOCAL_RANK = int(os.environ["LOCAL_RANK"])
@@ -70,12 +72,14 @@ if __name__ == "__main__":
     parser.add_argument("--pp_size", type=int, default=1)
     parser.add_argument("--tp_size", type=int, default=1)
     parser.add_argument("--cpu_offload_gb", type=int, default=0)
+    parser.add_argument("--gpu_memory_utilization", type=float, default=0.8)
     parser.add_argument(
         "-m",
         "--model_path",
         type=str,
         required=True
     )
+    parser.add_argument("--enforce_eager", type=eval, default=False)
     parser.add_argument("--max_tokens", type=int, default=128)
     parser.add_argument("--max_model_len", type=int, default=512)
     parser.add_argument("--T", type=float, default=0, help="temperature")
