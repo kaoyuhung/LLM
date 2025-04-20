@@ -453,7 +453,7 @@ def getModelandTokenizeer(
 
         snapshot_download(
             repo_id=repo_id,
-            allow_patterns=["*.json", "model-*.safetensors", "configuration*.py"],
+            allow_patterns=["*.json", "model-*.safetensors", "*.py"],
             local_dir=model_path,
         )
 

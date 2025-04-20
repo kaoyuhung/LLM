@@ -1,9 +1,9 @@
 import os
-import time
 import argparse
 import torch.distributed as dist
 from vllm import LLM, SamplingParams
 from utils import setup_seed, get_prompts
+from huggingface_hub import snapshot_download
 
 USE_TORCHRUN = "WORLD_SIZE" in os.environ
 
@@ -29,6 +29,28 @@ def main(args: argparse.Namespace):
         WORLD_RANK = int(os.environ["RANK"])
         NODE_RANK = int(os.environ["GROUP_RANK"])
         kwargs["distributed_executor_backend"]="external_launcher"
+
+    if not args.model_path.exists() and (not USE_TORCHRUN or LOCAL_RANK == 0):
+        args.model_path.mkdir(parents=True)
+        model_name = args.model_path.split('/')[-1]
+        if model_name in [
+            "deepseek-moe-16b-chat",
+            "DeepSeek-V2-Lite",
+            "DeepSeek-V2-Chat",
+            "DeepSeek-R1",
+        ]:
+            repo_id = "deepseek-ai/" + model_name
+        elif model_name == "Mixtral-8x7B-Instruct-v0.1":
+            repo_id = "mistralai/" + model_name
+        elif model_name == "Qwen1.5-MoE-A2.7B-Chat":
+            repo_id = "Qwen/" + model_name
+        snapshot_download(
+            repo_id=repo_id,
+            allow_patterns=["*.json", "model-*.safetensors", "*.py"],
+            local_dir=args.model_path,
+        )
+    if USE_TORCHRUN:
+        dist.barrier()
 
     llm = LLM(**kwargs)
 
