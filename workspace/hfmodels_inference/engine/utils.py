@@ -63,7 +63,7 @@ def evalGSM8K(
         extract_answer_from_output,
     )
     from GSM8K_eval.utils import download_url, load_jsonl
-  
+
     if "SLURM_JOB_ID" in os.environ:
         save_dir = (
             f"result/job{os.environ['SLURM_JOB_ID']}/eval_{model_name}_{model_version}"
@@ -77,7 +77,9 @@ def evalGSM8K(
 
     data_dir = Path("../dataset/GSM8K")
     test_filepath = os.path.join(data_dir, "gsm8k_test.jsonl")
-    if not os.path.exists(test_filepath) and (world_rank == 0 or (local_rank == 0 and "SLURM_JOB_ID" not in os.environ)):
+    if not os.path.exists(test_filepath) and (
+        world_rank == 0 or (local_rank == 0 and "SLURM_JOB_ID" not in os.environ)
+    ):
         download_url(
             "https://raw.githubusercontent.com/openai/"
             "grade-school-math/2909d34ef28520753df82a2234c357259d254aa8/"
@@ -86,7 +88,7 @@ def evalGSM8K(
         )
         os.rename(os.path.join(data_dir, "test.jsonl"), test_filepath)
     dist.barrier()
-    
+
     list_data_dict = load_jsonl(test_filepath, instruction="question", output="answer")
     answers = []
     for sample in tqdm(list_data_dict):
@@ -94,16 +96,16 @@ def evalGSM8K(
         # generate_kwargs = dict(max_new_tokens=256, top_p=0.95, temperature=0.8)
         # model_completion = generate(model, tokenizer, input_text, generate_kwargs)
         model_completion = generate(
-                [input_text],
-                tokenizer,
-                model,
-                max_new_tokens=max_new_tokens,
-                batch_size=1,
-                temperature=T,
-                top_p=P,
-                use_cache=True,
-                eos_id=model.generation_config.eos_token_id,
-            )[0]
+            [input_text],
+            tokenizer,
+            model,
+            max_new_tokens=max_new_tokens,
+            batch_size=1,
+            temperature=T,
+            top_p=P,
+            use_cache=True,
+            eos_id=model.generation_config.eos_token_id,
+        )[0]
         model_answer = clean_answer(model_completion)
         is_cor = is_correct(model_answer, sample["output"])
         answers.append(is_cor)
@@ -122,7 +124,7 @@ def evalGSM8K(
                 f"Accuracy: {float(sum(answers))/len(answers)}."
             )
         dist.barrier()
-      
+
     if world_rank == 0:
         with open(os.path.join(save_dir, "results.txt"), "w") as f:
             for answer in answers:
@@ -141,7 +143,15 @@ def evalGSM8K(
 
 @torch.no_grad()
 def evalMMLU(
-    nnodes, world_rank, local_rank, model_name, model_version, model, tokenizer, ntrain, dataset
+    nnodes,
+    world_rank,
+    local_rank,
+    model_name,
+    model_version,
+    model,
+    tokenizer,
+    ntrain,
+    dataset,
 ):
     sys.path.append("../llm_model_evaluation")
     from llm_model_evaluation.config.log_config import logging
@@ -254,7 +264,9 @@ def evalMMLU(
 
     # Retrieve list of subjects
     data_dir = Path(f"../dataset/{dataset}")
-    if not data_dir.exists() and (world_rank == 0 or ("SLURM_JOB_ID" not in os.environ and local_rank == 0)):
+    if not data_dir.exists() and (
+        world_rank == 0 or ("SLURM_JOB_ID" not in os.environ and local_rank == 0)
+    ):
         import shutil
 
         if dataset == "mmlu":
@@ -430,13 +442,14 @@ def getModelandTokenizeer(
     local_world_size: int,
     node_rank: int,
     nnodes,
-    model_name: str,
+    model_path: str,
     max_batch_size: int,
     device: torch.device,
     dtype: torch.dtype,
     model_version: str,
 ):
-    model_path = Path(f"../weights/{model_name}")
+    model_name = os.path.basename(model_path)
+    model_path = Path(model_path)
     if not model_path.exists() and local_rank == 0:
         model_path.mkdir(parents=True)
         if model_name in [

@@ -11,3 +11,4 @@ workspace/test
 examples
 test*.py
 *.vscode
+*.sif

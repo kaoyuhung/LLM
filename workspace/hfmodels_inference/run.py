@@ -16,7 +16,7 @@ from engine.generate import generate, measure_generate, nsys_profile_generate
 
 
 def run(
-    model_name: str,
+    model_path: str,
     max_tokens: int,
     T: float,
     P: float,
@@ -40,7 +40,7 @@ def run(
         LOCAL_WORLD_SIZE,
         NODE_RANK,
         NNODES,
-        model_name,
+        model_path,
         batch_size,
         device,
         dtype,
@@ -68,13 +68,20 @@ def run(
             dist.barrier()
 
     elif mode == "interative":
-        messages = [
-            {"role": "user", "content": prompt}
-        ]
-        input_tensor = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt")
-        outputs = model.generate(input_tensor.to(model.device) , max_new_tokens=max_tokens, return_dict_in_generate=True, output_scores=True)
-        output = tokenizer.decode(outputs[0][0][input_tensor.shape[-1]:], skip_special_tokens=True)
-        
+        messages = [{"role": "user", "content": prompt}]
+        input_tensor = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt"
+        )
+        outputs = model.generate(
+            input_tensor.to(model.device),
+            max_new_tokens=max_tokens,
+            return_dict_in_generate=True,
+            output_scores=True,
+        )
+        output = tokenizer.decode(
+            outputs[0][0][input_tensor.shape[-1] :], skip_special_tokens=True
+        )
+
         if LOCAL_RANK == 0:
             print(f"[INST]{prompt}[/INST]\n\nASSISTANT:{output}")
 
@@ -195,6 +202,8 @@ def run(
         )
 
     elif mode == "eval":
+        model_name = os.path.basename(model_path)
+
         if dataset == "mmlu" or dataset == "tmmluplus":
             from engine.utils import evalMMLU
 
@@ -214,7 +223,17 @@ def run(
             from engine.utils import evalGSM8K
 
             evalGSM8K(
-                NNODES, WORLD_RANK, LOCAL_RANK,model_name, model_version, model, tokenizer, ntrain, max_tokens, T, P
+                NNODES,
+                WORLD_RANK,
+                LOCAL_RANK,
+                model_name,
+                model_version,
+                model,
+                tokenizer,
+                ntrain,
+                max_tokens,
+                T,
+                P,
             )
 
     dist.barrier()
@@ -225,17 +244,9 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=17, help="random seed")
     parser.add_argument(
         "-m",
-        "--model",
+        "--model_path",
         type=str,
-        default="deepseek-moe-16b-chat",
-        choices=[
-            "deepseek-moe-16b-chat",
-            "DeepSeek-V2-Lite",
-            "DeepSeek-V2-Chat",
-            "DeepSeek-R1",
-            "Mixtral-8x7B-Instruct-v0.1",
-            "Qwen1.5-MoE-A2.7B-Chat",
-        ],
+        default="../weights/deepseek-moe-16b-chat",
     )
     parser.add_argument("--max_tokens", type=int, default=128)
     parser.add_argument("--T", type=float, default=0, help="temperature")
@@ -314,7 +325,7 @@ if __name__ == "__main__":
     )
     NNODES = get_nnodes(NODE_RANK, device)
     run(
-        args.model,
+        args.model_path,
         args.max_tokens,
         args.T,
         args.P,

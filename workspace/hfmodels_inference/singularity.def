@@ -1,0 +1,19 @@
+BootStrap: docker
+From: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+Stage: build
+%post
+    . /.singularity.d/env/10-docker*.sh
+
+%post
+    # misc
+    apt update && apt upgrade -y && apt autoremove && apt install -y wget vim git
+
+    # nsight-systems
+    sh -c 'echo -1 >/proc/sys/kernel/perf_event_paranoid'
+    NSYS_URL=https://developer.download.nvidia.com/devtools/nsight-systems/
+    NSYS_PKG=NsightSystems-linux-cli-public-2025.1.1.131-3554042.deb
+    wget ${NSYS_URL}${NSYS_PKG} && dpkg -i ${NSYS_PKG} && rm ${NSYS_PKG}
+
+%post 
+    # python packages
+    pip3 install transformers==4.51.1 torchinfo pandas flash_attn accelerate
