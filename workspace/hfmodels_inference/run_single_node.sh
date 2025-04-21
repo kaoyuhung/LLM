@@ -17,7 +17,7 @@ while getopts "p:m:i:b:M:V:d:t:" opt; do
       batch_size=$OPTARG
       ;;
     M)
-      model=$OPTARG
+      model=$(basename "$OPTARG")
       ;;
     V)
       model_version=$OPTARG
@@ -65,7 +65,7 @@ CMD="torchrun \
     --standalone \
     --nnodes=1 \
     --nproc-per-node=$nproc \
-    run.py --mode $mode --model $model --model_version $model_version "
+    run.py --mode $mode -m $model --model_version $model_version "
 if [ ! -z "$eval_nItrs" ]; then
   CMD+="--eval_nItrs $eval_nItrs "
 fi

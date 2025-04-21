@@ -32,7 +32,7 @@ while getopts "n:p:r:a:m:i:b:M:V:d:t:c:" opt; do
       batch_size=$OPTARG
       ;;
     M)
-      model=$OPTARG
+      model=$(basename "$OPTARG")
       ;;
     V)
       model_version=$OPTARG
@@ -87,7 +87,7 @@ CMD="torchrun \
     --master-addr=$master_addr \
     --master-port=$master_port \
     --max-restarts=3 \
-    run.py --mode $mode --model $model --model_version $model_version "
+    run.py --mode $mode -m $model --model_version $model_version "
 if [ ! -z "$eval_nItrs" ]; then
   CMD+="--eval_nItrs $eval_nItrs "
 fi
