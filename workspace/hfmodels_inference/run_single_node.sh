@@ -1,5 +1,5 @@
 #!/bin/bash
-usage="Usage: $0 -p <nproc> -m <mode> -M <model> -V <model_version>  \
+usage="Usage: $0 -p <nproc> -m <mode> -M <model_path> -V <model_version>  \
         [-i <eval_nItrs>] [-b <batch_size>] [-d <dataset>] [-t <max_tokens>]"
 
 while getopts "p:m:i:b:M:V:d:t:" opt; do
@@ -17,7 +17,8 @@ while getopts "p:m:i:b:M:V:d:t:" opt; do
       batch_size=$OPTARG
       ;;
     M)
-      model=$(basename "$OPTARG")
+      model_path=$OPTARG
+      model=$(basename "$model_path")
       ;;
     V)
       model_version=$OPTARG
@@ -35,7 +36,7 @@ while getopts "p:m:i:b:M:V:d:t:" opt; do
   esac
 done
 
-if [ -z "$nproc" ] || [ -z "$mode" ] || [ -z "$model" ] || [ -z "$model_version" ]; then
+if [ -z "$nproc" ] || [ -z "$mode" ] || [ -z "$model_path" ] || [ -z "$model_version" ]; then
   echo $usage
   exit 1
 fi
@@ -65,7 +66,7 @@ CMD="torchrun \
     --standalone \
     --nnodes=1 \
     --nproc-per-node=$nproc \
-    run.py --mode $mode -m $model --model_version $model_version "
+    run.py --mode $mode -m $model_path --model_version $model_version "
 if [ ! -z "$eval_nItrs" ]; then
   CMD+="--eval_nItrs $eval_nItrs "
 fi

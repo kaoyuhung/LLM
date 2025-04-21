@@ -1,6 +1,6 @@
 #!/bin/bash
 
-usage="Usage: $0 -n <nnodes> -p <nproc> -r <node_rank> -a <master_addr:master_port> -m <mode> -M <model> -V <model_version>  \
+usage="Usage: $0 -n <nnodes> -p <nproc> -r <node_rank> -a <master_addr:master_port> -m <mode> -M <model_path> -V <model_version>  \
         [-i <eval_nItrs>] [-b <batch_size>] [-d <dataset>] [-t <max_tokens>] [-c <use_cache>]"
 
 if [ ! -z "${SLURM_NODEID}" ]; then
@@ -32,7 +32,8 @@ while getopts "n:p:r:a:m:i:b:M:V:d:t:c:" opt; do
       batch_size=$OPTARG
       ;;
     M)
-      model=$(basename "$OPTARG")
+      model_path=$OPTARG
+      model=$(basename "$model_path")
       ;;
     V)
       model_version=$OPTARG
@@ -53,7 +54,7 @@ while getopts "n:p:r:a:m:i:b:M:V:d:t:c:" opt; do
   esac
 done
 
-if [ -z "$nnodes" ] || [ -z "$nproc" ] || [ -z "$node_rank" ] || [ -z "$master_addr" ] || [ -z "$master_port" ]  || [ -z "$mode" ] || [ -z "$model" ] || [ -z "$model_version" ]; then
+if [ -z "$nnodes" ] || [ -z "$nproc" ] || [ -z "$node_rank" ] || [ -z "$master_addr" ] || [ -z "$master_port" ]  || [ -z "$mode" ] || [ -z "$model_path" ] || [ -z "$model_version" ]; then
   echo $usage
   exit 1
 fi
@@ -87,7 +88,7 @@ CMD="torchrun \
     --master-addr=$master_addr \
     --master-port=$master_port \
     --max-restarts=3 \
-    run.py --mode $mode -m $model --model_version $model_version "
+    run.py --mode $mode -m $model_path --model_version $model_version "
 if [ ! -z "$eval_nItrs" ]; then
   CMD+="--eval_nItrs $eval_nItrs "
 fi

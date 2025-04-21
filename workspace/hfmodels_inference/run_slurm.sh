@@ -13,7 +13,7 @@
 module purge
 module load cuda
 
-usage="Usage: $0 -m <mode> -M <model> -V <model_version>  \
+usage="Usage: $0 -m <mode> -M <model_path> -V <model_version>  \
         [-i <eval_nItrs>] [-b <batch_size>] [-d <dataset>] [-t <max_tokens>]"
 
 while getopts "m:i:b:M:V:d:t:" opt; do
@@ -28,7 +28,7 @@ while getopts "m:i:b:M:V:d:t:" opt; do
       batch_size=$OPTARG
       ;;
     M)
-      model=$OPTARG
+      model_path=$OPTARG
       ;;
     V)
       model_version=$OPTARG
@@ -46,7 +46,7 @@ while getopts "m:i:b:M:V:d:t:" opt; do
   esac
 done
 
-if [ -z "$mode" ] || [ -z "$model" ] || [ -z "$model_version" ]; then
+if [ -z "$mode" ] || [ -z "$model_path" ] || [ -z "$model_version" ]; then
   echo $usage
   exit 1
 fi
@@ -55,7 +55,7 @@ fi
 # export NCCL_DEBUG=INFO
 
 if [ "$SLURM_JOB_NUM_NODES" -eq 1 ]; then
-  SRUN_CMD="./run_single_node.sh -p $SLURM_GPUS_PER_NODE -m $mode -M $model -V $model_version "
+  SRUN_CMD="./run_single_node.sh -p $SLURM_GPUS_PER_NODE -m $mode -M $model_path -V $model_version "
 
 else
   # net
@@ -66,7 +66,7 @@ else
   head_node=${nodes_array[0]}
   MASTER_ADDR=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
   MASTER_PORT=$(expr 10000 + $(echo -n $SLURM_JOBID | tail -c 4))
-  SRUN_CMD="./run_multinode.sh -n $SLURM_JOB_NUM_NODES -p $SLURM_GPUS_PER_NODE -a $MASTER_ADDR:$MASTER_PORT -m $mode -M $model -V $model_version " 
+  SRUN_CMD="./run_multinode.sh -n $SLURM_JOB_NUM_NODES -p $SLURM_GPUS_PER_NODE -a $MASTER_ADDR:$MASTER_PORT -m $mode -M $model_path -V $model_version " 
 fi
 if [ ! -z "$eval_nItrs" ]; then
   SRUN_CMD+="-i $eval_nItrs "
