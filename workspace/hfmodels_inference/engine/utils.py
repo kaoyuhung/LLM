@@ -461,7 +461,7 @@ def getModelandTokenizeer(
             repo_id = "deepseek-ai/" + model_name
         elif model_name == "Mixtral-8x7B-Instruct-v0.1":
             repo_id = "mistralai/" + model_name
-        elif model_name == "Qwen1.5-MoE-A2.7B-Chat":
+        elif model_name in ["Qwen1.5-MoE-A2.7B-Chat", "Qwen2-57B-A14B-Instruct"]:
             repo_id = "Qwen/" + model_name
 
         snapshot_download(
@@ -469,11 +469,9 @@ def getModelandTokenizeer(
             allow_patterns=["*.json", "model-*.safetensors", "*.py"],
             local_dir=model_path,
         )
-
     dist.barrier()
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-
     if model_name == "deepseek-moe-16b-chat":
         from engine.deepseekmoe.transformer import Transformer
     elif model_name == "DeepSeek-V2-Lite" or model_name == "DeepSeek-V2-Chat":
@@ -484,7 +482,7 @@ def getModelandTokenizeer(
         from engine.mixtral8x7Binstruct.transformer import Transformer
 
         tokenizer.pad_token = tokenizer.eos_token
-    elif model_name == "Qwen1.5-MoE-A2.7B-Chat":
+    elif model_name in ["Qwen1.5-MoE-A2.7B-Chat", "Qwen2-57B-A14B-Instruct"]:
         from engine.qwenmoe.transformer import Transformer
 
     if model_version == "PP":
