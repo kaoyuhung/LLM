@@ -608,10 +608,6 @@ class MixtralSparseMoeBlock(nn.Module):
         # we cast back to the input dtype
         routing_weights = routing_weights.to(hidden_states.dtype)
 
-        # print(
-        #     f"Moe in: {hidden_states.sum()} {router_logits.sum()} {selected_experts.sum()} {routing_weights.sum()} {self.gate.weight.sum()}"
-        # )
-
         final_hidden_states = self.moe_infer(
             hidden_states, selected_experts, routing_weights
         ).view(*orig_shape)

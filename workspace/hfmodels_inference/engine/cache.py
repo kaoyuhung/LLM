@@ -120,19 +120,19 @@ class StaticCache(Cache):
             #     breaks when updating the cache. It can't be used if the cache code is being compiled (but in that case
             #     it is not needed anyway)
             # 2. `torch.export()` requires mutations to be registered as buffers.
-            if not is_torchdynamo_compiling():
-                self.register_buffer(
-                    f"key_cache_{idx}",
-                    torch.zeros(kcache_shape, dtype=dtype, device=layer_device),
-                )
-                self.register_buffer(
-                    f"value_cache_{idx}",
-                    torch.zeros(vcache_shape, dtype=dtype, device=layer_device),
-                )
-                new_layer_key_cache = getattr(self, f"key_cache_{idx}")
-                new_layer_value_cache = getattr(self, f"value_cache_{idx}")
-                torch._dynamo.mark_static_address(new_layer_key_cache)
-                torch._dynamo.mark_static_address(new_layer_value_cache)
+            # if not is_torchdynamo_compiling():
+            #     self.register_buffer(
+            #         f"key_cache_{idx}",
+            #         torch.zeros(kcache_shape, dtype=dtype, device=layer_device),
+            #     )
+            #     self.register_buffer(
+            #         f"value_cache_{idx}",
+            #         torch.zeros(vcache_shape, dtype=dtype, device=layer_device),
+            #     )
+            #     new_layer_key_cache = getattr(self, f"key_cache_{idx}")
+            #     new_layer_value_cache = getattr(self, f"value_cache_{idx}")
+            #     torch._dynamo.mark_static_address(new_layer_key_cache)
+            #     torch._dynamo.mark_static_address(new_layer_value_cache)
             self.key_cache[idx] = new_layer_key_cache
             self.value_cache[idx] = new_layer_value_cache
 

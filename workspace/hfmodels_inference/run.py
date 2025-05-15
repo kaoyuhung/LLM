@@ -286,6 +286,7 @@ if __name__ == "__main__":
         "--dtype", type=str, default="bfloat16", choices=["float16", "bfloat16"]
     )
     parser.add_argument(
+        "-V",
         "--model_version",
         type=str,
         default="PP",
