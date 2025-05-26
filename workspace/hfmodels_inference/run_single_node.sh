@@ -81,9 +81,9 @@ if [ ! -z "$max_tokens" ]; then
 fi
 
 if [ $mode = "measure" ]; then
-   for N in 1 2 4 8 16 32 64 128 256
+   for N in 1 2 4 8 16 32 64
     do
-      $CMD --batch_size $N >> $output_folder/$output_file
+      $CMD -b $N >> $output_folder/$output_file
     done
 
 elif [ $mode = "nsys_profile" ]; then

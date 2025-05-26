@@ -192,7 +192,7 @@ def run(
                 f"total_prefill_tokens: {total_prefill_tokens}, total_decode_tokens: {total_decode_tokens}"
             )
             print(
-                f"tota] prefill time: {total_prefill_time:.2f} s, total decode time: {(total_decode_time):.2f} s"
+                f"total prefill time: {total_prefill_time:.2f} s, total decode time: {(total_decode_time):.2f} s"
             )
             print(
                 f"avg. prefill throughput: {total_prefill_tokens / total_prefill_time:.2f} tokens/s, avg. decode throughtput: {(total_decode_tokens / total_decode_time):.2f} tokens/s"
