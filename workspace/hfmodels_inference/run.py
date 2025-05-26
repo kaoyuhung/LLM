@@ -104,11 +104,11 @@ def run(
                 use_cache=use_cache,
                 eos_id=model.generation_config.eos_token_id,
             )
-            if LOCAL_RANK == 0:
-                for id, resonse in enumerate(responses):
-                    prompt_id = i * batch_size + id
-                    print(f"[INST]{prompts[prompt_id]}[/INST]\n\nASSISTANT:{resonse}")
-                    print("-" * 100)
+        if LOCAL_RANK == 0:
+            for id, resonse in enumerate(responses):
+                prompt_id = i * batch_size + id
+                print(f"[INST]{prompts[prompt_id]}[/INST]\n\nASSISTANT:{resonse}")
+                print("-" * 100)
 
         dist.barrier()
 
@@ -140,6 +140,12 @@ def run(
                 )
         dist.barrier()
 
+        prefill_ts, decode_ts, prefill_tokens, decode_tokens = (
+            [],
+            [],
+            [],
+            [],
+        )
         for i in range(eval_nItrs):
             inputs = prompts[
                 i * batch_size : i * batch_size
@@ -158,13 +164,41 @@ def run(
                     eos_id=model.generation_config.eos_token_id,
                 )
             )
-            if LOCAL_RANK == 0:
-                print(f"evalItr{i} (batch_size={batch_size})")
-                print(
-                    f"Prefill time: {prefill_time:.2f} s, Decode time: {(decode_time):.2f} s, Prefill throughput: {n_prefill_tokens / prefill_time:.2f} tokens/s, Decode throughtput: {(n_decode_tokens / decode_time):.2f} tokens/s"
-                )
-                print("-" * 100)
+            prefill_ts.append(prefill_time)
+            decode_ts.append(decode_time)
+            prefill_tokens.append(n_prefill_tokens)
+            decode_tokens.append(n_decode_tokens)
+            # if LOCAL_RANK == 0:
+            #     print(f"evalItr{i} (batch_size={batch_size})")
+            #     print(
+            #         f"n_prefill_tokens: {n_prefill_tokens}, n_decode_tokens: {n_decode_tokens}"
+            #     )
+            #     print(
+            #         f"prefill time: {prefill_time:.2f} s, decode time: {(decode_time):.2f} s"
+            #     )
+            #     print(
+            #         f"prefill throughput: {n_prefill_tokens / prefill_time:.2f} tokens/s, decode throughtput: {(n_decode_tokens / decode_time):.2f} tokens/s"
+            #     )
+            #     print("-" * 100)
             dist.barrier()
+
+        if LOCAL_RANK == 0:
+            total_prefill_tokens = sum(prefill_tokens)
+            total_decode_tokens = sum(decode_tokens)
+            total_prefill_time = sum(prefill_ts)
+            total_decode_time = sum(decode_ts)
+            print(f"n_eval_nItrs: {eval_nItrs}, batch_size: {batch_size}")
+            print(
+                f"total_prefill_tokens: {total_prefill_tokens}, total_decode_tokens: {total_decode_tokens}"
+            )
+            print(
+                f"tota] prefill time: {total_prefill_time:.2f} s, total decode time: {(total_decode_time):.2f} s"
+            )
+            print(
+                f"avg. prefill throughput: {total_prefill_tokens / total_prefill_time:.2f} tokens/s, avg. decode throughtput: {(total_decode_tokens / total_decode_time):.2f} tokens/s"
+            )
+            print("-" * 100)
+        dist.barrier()
 
     elif mode == "nsys_profile":
         prompts = get_prompts()
@@ -268,8 +302,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prompt_path",
         type=str,
-        default="../prompts/diverse_short.json",
+        default="../prompts/mixtral_8x7b_128.json",
         choices=[
+            "../prompts/mixtral_8x7b_128.json",
             "../prompts/diverse_short.json",
             "../prompts/long.json",
             "../prompts/mid.json",
@@ -279,7 +314,7 @@ if __name__ == "__main__":
             "../prompts/vicuna_bench.json",
         ],
     )
-    parser.add_argument("--eval_nItrs", type=int, default=1)
+    parser.add_argument("-i", "--eval_nItrs", type=int, default=1)
     parser.add_argument("--warmup_iters", type=int, default=1)
     parser.add_argument("-b", "--batch_size", type=int, default=1)
     parser.add_argument(
