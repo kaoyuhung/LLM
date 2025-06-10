@@ -1,6 +1,7 @@
 BootStrap: docker
-From: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+From: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 Stage: build
+
 %post
     . /.singularity.d/env/10-docker*.sh
 
@@ -16,4 +17,4 @@ Stage: build
 
 %post 
     # python packages
-    pip3 install transformers==4.51.1 torchinfo pandas flash_attn accelerate
+    pip3 install transformers==4.51.1 torchinfo pandas flash_attn accelerate packaging
